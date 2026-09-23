@@ -157,6 +157,15 @@ blank: the first time the bot starts with `BOT_TOKEN` + `ADMIN_ID` set, it
 DMs you 🌐 **Choose language**. Change it later anytime from **🌐 Language**
 in `/settings`. Translations live in `locales/en.json` and `locales/ru.json`.
 
+The first time a language is chosen, the bot also sends a short one-time
+credits message. The same info is always available from **ℹ️ About** in
+`/settings`.
+
+## Credits
+
+Made by [LunaTheWolf](https://github.com/Vov4ik3), built with
+[Claude](https://claude.com) (Anthropic).
+
 Drafts are kept in memory, so restarting the bot expires any that haven't been
 answered yet.
 

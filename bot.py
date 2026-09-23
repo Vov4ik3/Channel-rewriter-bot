@@ -822,7 +822,7 @@ class App:
             [Button.inline(self.t("btn_review_toggle", state=on if self.cfg.review_mode else off), "st:review")],
             [Button.inline(self.t("btn_media_toggle", state=on if self.cfg.include_media else off), "st:media")],
             [Button.inline(self.t("btn_daily"), "st:daily"), Button.inline(self.t("btn_language"), "st:lang")],
-            [Button.inline(self.t("btn_close"), "st:close")],
+            [Button.inline(self.t("btn_about"), "st:about"), Button.inline(self.t("btn_close"), "st:close")],
         ]
 
     def channels_text(self) -> str:
@@ -947,11 +947,19 @@ class App:
             await event.edit(self.t("choose_language"), buttons=self.language_buttons())
 
         elif sub == "setlang":
+            first_time = not self.cfg.lang
             self.cfg.lang = arg if arg in LANGUAGES else "en"
             update_env({"LANG": self.cfg.lang})
             await event.answer()
             await event.edit(self.t("language_saved"), buttons=None)
+            if first_time:
+                await self.bot.send_message(self.cfg.admin_id, self.t("credits_line"))
             await self.bot.send_message(self.cfg.admin_id, self.settings_text(), buttons=self.settings_buttons())
+
+        elif sub == "about":
+            await event.answer()
+            await event.edit(self.t("about_text"), buttons=[[Button.inline(self.t("btn_back"), "st:home")]],
+                              link_preview=False)
 
     async def try_add_channel(self, event, ref: str) -> None:
         # a forwarded message identifies its channel more reliably than typed text

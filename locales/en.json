@@ -95,5 +95,9 @@
   "media_toggled": "Media {state}",
 
   "choose_language": "🌐 Choose language / Выберите язык:",
-  "language_saved": "✅ Language set to English."
+  "language_saved": "✅ Language set to English.",
+  "credits_line": "Made by LunaTheWolf (@Vov4ik3), built with Claude (Anthropic) 🤍",
+
+  "btn_about": "ℹ️ About",
+  "about_text": "ℹ️ About\n\nChannel Rewriter watches Telegram channels, rewrites new posts with Gemini, and posts them to your channel or group.\n\nMade by LunaTheWolf (@Vov4ik3)\nBuilt with Claude (Anthropic)\n\ngithub.com/Vov4ik3/Channel-rewriter-bot"
 }

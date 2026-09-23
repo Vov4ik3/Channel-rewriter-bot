@@ -95,5 +95,9 @@
   "media_toggled": "Медиа: {state}",
 
   "choose_language": "🌐 Choose language / Выберите язык:",
-  "language_saved": "✅ Язык изменён на русский."
+  "language_saved": "✅ Язык изменён на русский.",
+  "credits_line": "Автор: LunaTheWolf (@Vov4ik3), создано с помощью Claude (Anthropic) 🤍",
+
+  "btn_about": "ℹ️ О боте",
+  "about_text": "ℹ️ О боте\n\nChannel Rewriter отслеживает Telegram-каналы, переписывает новые посты через Gemini и публикует их в ваш канал или группу.\n\nАвтор: LunaTheWolf (@Vov4ik3)\nСоздано с помощью Claude (Anthropic)\n\ngithub.com/Vov4ik3/Channel-rewriter-bot"
 }
