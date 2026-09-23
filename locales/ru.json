@@ -8,7 +8,7 @@
   "btn_post": "✅ Опубликовать",
   "btn_edit": "✏️ Изменить",
   "btn_skip": "🗑 Пропустить",
-  "btn_rewrite": "🔄 Переписать через Gemini",
+  "btn_rewrite": "🔄 Переписать через ИИ",
   "btn_next": "Далее ➡️",
   "btn_cancel": "✖ Отмена",
   "btn_keep_text": "↩️ Оставить текущий текст",
@@ -99,5 +99,30 @@
   "credits_line": "Автор: LunaTheWolf (@Vov4ik3), создано с помощью Claude (Anthropic) 🤍",
 
   "btn_about": "ℹ️ О боте",
-  "about_text": "ℹ️ О боте\n\nChannel Rewriter отслеживает Telegram-каналы, переписывает новые посты через Gemini и публикует их в ваш канал или группу.\n\nАвтор: LunaTheWolf (@Vov4ik3)\nСоздано с помощью Claude (Anthropic)\n\ngithub.com/Vov4ik3/Channel-rewriter-bot"
+  "about_text": "ℹ️ О боте\n\nChannel Rewriter отслеживает Telegram-каналы, переписывает новые посты через Gemini и публикует их в ваш канал или группу.\n\nАвтор: LunaTheWolf (@Vov4ik3)\nСоздано с помощью Claude (Anthropic)\n\ngithub.com/Vov4ik3/Channel-rewriter-bot",
+
+  "btn_ai": "🤖 ИИ-провайдер",
+  "settings_ai_line": "🤖 ИИ: {state}",
+  "ai_not_configured": "не выбран",
+  "ai_current": "🤖 ИИ: {provider}\nМодель: {model}",
+  "ai_local_server_line": "🌐 Сервер: {url}",
+  "ai_choose_prompt": "🤖 Какой ИИ будет переписывать посты?",
+  "ai_switched": "Переключено на {provider}",
+  "btn_change_model": "✏️ Изменить модель",
+  "btn_change_server": "🌐 Изменить адрес сервера",
+  "ai_model_prompt": "✏️ Отправьте название модели (сейчас: {current}).",
+  "ai_model_set": "✅ Модель изменена на {model}.",
+  "ai_server_prompt": "🌐 Отправьте адрес локального сервера, совместимого с OpenAI (сейчас: {current}). Пример: http://localhost:11434/v1 для Ollama.",
+  "ai_server_set": "✅ Адрес сервера изменён на {url}.",
+
+  "ai_name_gemini": "Gemini",
+  "ai_name_openai": "OpenAI (ChatGPT)",
+  "ai_name_deepseek": "DeepSeek",
+  "ai_name_claude": "Claude",
+  "ai_name_local": "Локальная модель",
+
+  "ai_setup_gemini": "🔑 Gemini нужен API-ключ. Бесплатно, без карты:\n1. Зайдите на aistudio.google.com\n2. Нажмите «Get API key»\n3. Отправьте ключ сюда сообщением.",
+  "ai_setup_openai": "🔑 OpenAI нужен API-ключ (платно, без бесплатного тарифа):\n1. Зайдите на platform.openai.com/api-keys\n2. Создайте новый ключ\n3. Отправьте его сюда сообщением.",
+  "ai_setup_deepseek": "🔑 DeepSeek нужен API-ключ (платно, дёшево):\n1. Зайдите на platform.deepseek.com\n2. Создайте новый ключ\n3. Отправьте его сюда сообщением.",
+  "ai_setup_claude": "🔑 Claude нужен API-ключ (платно, без бесплатного тарифа):\n1. Зайдите на console.anthropic.com\n2. Создайте новый ключ\n3. Отправьте его сюда сообщением."
 }

@@ -1,5 +1,5 @@
 """
-Channel Rewriter: watches Telegram channels, rewrites new posts with Gemini,
+Channel Rewriter: watches Telegram channels, rewrites new posts with an AI,
 and publishes them to your group.
 
     python login.py   # once, to log the reader account in
@@ -28,7 +28,6 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 from google import genai
-from google.genai import errors as genai_errors
 from google.genai import types as genai_types
 from telethon import Button, TelegramClient, events
 from telethon.tl.functions.channels import JoinChannelRequest
@@ -42,6 +41,12 @@ PROMPT_PATH = BASE_DIR / "prompt.txt"
 ENV_PATH = BASE_DIR / ".env"
 LOCALES_DIR = BASE_DIR / "locales"
 LANGUAGES = ("en", "ru")
+AI_KEY_FIELDS = {   # provider -> (Config attr, .env var name)
+    "gemini": ("gemini_api_key", "GEMINI_API_KEY"),
+    "openai": ("openai_api_key", "OPENAI_API_KEY"),
+    "deepseek": ("deepseek_api_key", "DEEPSEEK_API_KEY"),
+    "claude": ("anthropic_api_key", "ANTHROPIC_API_KEY"),
+}
 USER_SESSION = str(BASE_DIR / "reader")    # -> reader.session
 BOT_SESSION = str(BASE_DIR / "poster")     # -> poster.session
 
@@ -142,20 +147,26 @@ def _chat_ref(value: str) -> int | str:
 class Config:
     api_id: int
     api_hash: str
-    gemini_key: str
     sources: list[str]
     target: int | str
     bot_token: str = ""
     review_mode: bool = False
     admin_id: int = 0
-    model: str = "gemini-flash-latest"
     min_length: int = 50
     include_media: bool = True
     max_media_mb: int = 45
-    gemini_delay: float = 6.0
+    ai_delay: float = 6.0
     daily_summary: bool = True
     daily_summary_hour: int = 18
     lang: str = ""
+    ai_provider: str = ""       # gemini | openai | deepseek | claude | local, "" = not configured yet
+    ai_model: str = ""          # blank = provider's default
+    gemini_api_key: str = ""
+    openai_api_key: str = ""
+    deepseek_api_key: str = ""
+    anthropic_api_key: str = ""
+    local_base_url: str = "http://localhost:11434/v1"
+    local_api_key: str = "local"
 
     @classmethod
     def load(cls) -> "Config":
@@ -170,23 +181,46 @@ class Config:
         cfg = cls(
             api_id=api_id,
             api_hash=_env("TG_API_HASH", required=True),
-            gemini_key=_env("GEMINI_API_KEY", required=True),
             sources=sources,
             target=_chat_ref(_env("TARGET_CHAT", required=True)),
             bot_token=_env("BOT_TOKEN"),
             review_mode=_env_bool("REVIEW_MODE", False),
             admin_id=int(_env("ADMIN_ID", "0") or 0),
-            model=_env("GEMINI_MODEL", "gemini-flash-latest"),
             min_length=int(_env("MIN_TEXT_LENGTH", "50")),
             include_media=_env_bool("INCLUDE_MEDIA", True),
             max_media_mb=int(_env("MAX_MEDIA_MB", "45")),
-            gemini_delay=float(_env("GEMINI_DELAY_SECONDS", "6")),
+            ai_delay=float(_env("AI_DELAY_SECONDS", "6")),
             daily_summary=_env_bool("DAILY_SUMMARY", True),
             daily_summary_hour=int(_env("DAILY_SUMMARY_HOUR_UTC", "18")),
             lang=_env("LANG").strip().lower(),
+            ai_provider=_env("AI_PROVIDER").strip().lower(),
+            ai_model=_env("AI_MODEL"),
+            gemini_api_key=_env("GEMINI_API_KEY"),
+            openai_api_key=_env("OPENAI_API_KEY"),
+            deepseek_api_key=_env("DEEPSEEK_API_KEY"),
+            anthropic_api_key=_env("ANTHROPIC_API_KEY"),
+            local_base_url=_env("LOCAL_BASE_URL", "http://localhost:11434/v1"),
+            local_api_key=_env("LOCAL_API_KEY", "local"),
         )
         if cfg.lang not in ("", *LANGUAGES):
             cfg.lang = ""
+
+        # AI provider: "" means "ask on first startup" (like language). A provider
+        # is only kept if its key is actually present; otherwise fall back to
+        # auto-detecting a single already-configured key (old .env files just had
+        # GEMINI_API_KEY set), else defer to the /settings or first-run picker.
+        has_key = {
+            "gemini": bool(cfg.gemini_api_key), "openai": bool(cfg.openai_api_key),
+            "deepseek": bool(cfg.deepseek_api_key), "claude": bool(cfg.anthropic_api_key),
+            "local": True,
+        }
+        if cfg.ai_provider not in Rewriter.PROVIDERS or not has_key.get(cfg.ai_provider, False):
+            cfg.ai_provider = ""
+        if not cfg.ai_provider:
+            configured = [p for p, ok in has_key.items() if ok and p != "local"]
+            if len(configured) == 1:
+                cfg.ai_provider = configured[0]
+
         if cfg.review_mode and not (cfg.bot_token and cfg.admin_id):
             raise ConfigError("REVIEW_MODE=1 needs both BOT_TOKEN and ADMIN_ID")
         if not PROMPT_PATH.exists():
@@ -243,46 +277,101 @@ class SeenStore:
 # ------------------------------------------------------------- rewriter ---
 
 class Rewriter:
+    """Rewrites posts through whichever AI provider is configured. Gemini and
+    Claude use their own SDKs; OpenAI, DeepSeek and a local server are all
+    OpenAI-compatible, so they share one client class with a different
+    base_url/key."""
+
     SKIP = "SKIP"
+    PROVIDERS = {
+        "gemini": {"default_model": "gemini-flash-latest"},
+        "openai": {"default_model": "gpt-6-luna"},
+        "deepseek": {"default_model": "deepseek-flash"},
+        "claude": {"default_model": "claude-opus-5"},
+        "local": {"default_model": "llama3.1"},
+    }
 
     def __init__(self, cfg: Config):
-        self.client = genai.Client(api_key=cfg.gemini_key)
-        self.model = cfg.model
+        self.cfg = cfg
+        self.provider = cfg.ai_provider
+        self.model = cfg.ai_model or self.PROVIDERS.get(self.provider, {}).get("default_model", "")
+        self._client = None
 
     @staticmethod
     def _prompt() -> str:
         # re-read every time, so edits to prompt.txt apply without a restart
         return PROMPT_PATH.read_text(encoding="utf-8").strip()
 
+    def _ensure_client(self):
+        if self._client is not None:
+            return self._client
+        if self.provider == "gemini":
+            self._client = genai.Client(api_key=self.cfg.gemini_api_key)
+        elif self.provider == "claude":
+            import anthropic
+            self._client = anthropic.AsyncAnthropic(api_key=self.cfg.anthropic_api_key)
+        elif self.provider == "openai":
+            from openai import AsyncOpenAI
+            self._client = AsyncOpenAI(api_key=self.cfg.openai_api_key)
+        elif self.provider == "deepseek":
+            from openai import AsyncOpenAI
+            self._client = AsyncOpenAI(api_key=self.cfg.deepseek_api_key, base_url="https://api.deepseek.com")
+        elif self.provider == "local":
+            from openai import AsyncOpenAI
+            self._client = AsyncOpenAI(api_key=self.cfg.local_api_key or "local", base_url=self.cfg.local_base_url)
+        else:
+            raise ConfigError(f"Unknown AI_PROVIDER {self.provider!r}")
+        return self._client
+
+    async def _call_once(self, system_prompt: str, user_msg: str) -> str:
+        client = self._ensure_client()
+        if self.provider == "gemini":
+            resp = await client.aio.models.generate_content(
+                model=self.model,
+                contents=user_msg,
+                config=genai_types.GenerateContentConfig(system_instruction=system_prompt, temperature=0.8),
+            )
+            return (resp.text or "").strip()
+        if self.provider == "claude":
+            resp = await client.messages.create(
+                model=self.model, max_tokens=1024, temperature=0.8,
+                system=system_prompt, messages=[{"role": "user", "content": user_msg}],
+            )
+            return "".join(b.text for b in resp.content if getattr(b, "type", "") == "text").strip()
+        # openai / deepseek / local: OpenAI-compatible chat completions
+        resp = await client.chat.completions.create(
+            model=self.model, temperature=0.8,
+            messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_msg}],
+        )
+        return (resp.choices[0].message.content or "").strip()
+
     async def rewrite(self, text: str, source_title: str) -> str | None:
-        """Returns new text, "SKIP", or None if Gemini failed."""
+        """Returns new text, "SKIP", or None if the AI provider failed or
+        isn't configured yet."""
+        if not self.provider:
+            log.warning("No AI provider configured; post from %s dropped "
+                        "(set one up via /settings or the first-run prompt)", source_title)
+            return None
         user_msg = f"Source channel: {source_title}\n\nOriginal post:\n{text}"
+        system_prompt = self._prompt()
         for attempt in range(4):
             try:
-                resp = await self.client.aio.models.generate_content(
-                    model=self.model,
-                    contents=user_msg,
-                    config=genai_types.GenerateContentConfig(
-                        system_instruction=self._prompt(),
-                        temperature=0.8,
-                    ),
-                )
-                out = (resp.text or "").strip()
+                out = await self._call_once(system_prompt, user_msg)
                 if not out:
-                    log.warning("Gemini returned an empty answer (possibly blocked by safety filters)")
+                    log.warning("%s returned an empty answer (possibly blocked/filtered)", self.provider)
                     return None
                 return self.SKIP if out.strip(" .").upper() == self.SKIP else out
-            except genai_errors.APIError as e:
-                if e.code == 429 or (e.code and e.code >= 500):
+            except Exception as e:
+                code = getattr(e, "status_code", None) or getattr(e, "code", None)
+                msg = str(e).lower()
+                transient = code in (429, 500, 502, 503, 529) or "rate limit" in msg or "overloaded" in msg
+                if transient and attempt < 3:
                     wait = 20 * (attempt + 1)
-                    log.warning("Gemini error %s, retrying in %ss", e.code, wait)
+                    log.warning("%s error, retrying in %ss: %s", self.provider, wait, e)
                     await asyncio.sleep(wait)
                     continue
-                log.error("Gemini error %s: %s", e.code, e)
+                log.error("%s request failed: %s", self.provider, e)
                 return None
-            except Exception:
-                log.exception("Gemini request failed")
-                await asyncio.sleep(10)
         return None
 
 
@@ -401,7 +490,7 @@ class App:
     async def run(self) -> None:
         await self.start()
         mode = "review (drafts go to admin first)" if self.cfg.review_mode else "auto-post"
-        log.info("Running in %s mode. Model: %s", mode, self.cfg.model)
+        log.info("Running in %s mode. AI: %s (%s)", mode, self.cfg.ai_provider or "not configured", self.rewriter.model)
         if self.cfg.daily_summary and self.bot and self.cfg.admin_id:
             log.info("Daily summary prompt at %02d:00 UTC", self.cfg.daily_summary_hour)
         elif self.cfg.daily_summary:
@@ -412,6 +501,16 @@ class App:
                                             buttons=self.language_buttons())
             except Exception:
                 log.exception("Language prompt failed")
+        if not self.cfg.ai_provider:
+            if self.bot and self.cfg.admin_id:
+                try:
+                    await self.bot.send_message(self.cfg.admin_id, self.t("ai_choose_prompt"),
+                                                buttons=self.ai_buttons())
+                except Exception:
+                    log.exception("AI provider prompt failed")
+            else:
+                log.warning("No AI provider configured, and no BOT_TOKEN/ADMIN_ID to ask for one — "
+                            "posts will be dropped until AI_PROVIDER is set in .env")
         worker = asyncio.create_task(self.worker())
         self.summary_task = asyncio.create_task(self.daily_summary_loop())
         try:
@@ -432,6 +531,12 @@ class App:
         if self.summary_task:
             self.summary_task.cancel()
         self.summary_task = asyncio.create_task(self.daily_summary_loop())
+
+    def apply_ai_provider(self, provider: str) -> None:
+        self.cfg.ai_provider = provider
+        self.cfg.ai_model = ""   # reset to that provider's own default
+        update_env({"AI_PROVIDER": provider, "AI_MODEL": ""})
+        self.rewriter = Rewriter(self.cfg)
 
     async def shutdown(self) -> None:
         for client in (self.user, self.bot):
@@ -504,7 +609,7 @@ class App:
                 self.stats["failed"] += 1
                 log.exception("Failed to process post from %s", post.source_title)
                 post.cleanup()
-            await asyncio.sleep(self.cfg.gemini_delay)
+            await asyncio.sleep(self.cfg.ai_delay)
 
     async def process(self, post: Post) -> None:
         new = await self.rewriter.rewrite(post.text, post.source_title)
@@ -515,7 +620,7 @@ class App:
             return
         if new == Rewriter.SKIP:
             self.stats["skipped"] += 1
-            log.info("Gemini skipped a post from %s (ad / no content)", post.source_title)
+            log.info("AI skipped a post from %s (ad / no content)", post.source_title)
             post.cleanup()
             return
         post.new_text = new
@@ -526,7 +631,7 @@ class App:
 
     @staticmethod
     def fix_formatting(text: str) -> str:
-        """Telethon markdown is **bold** and __italic__. Gemini often writes
+        """Telethon markdown is **bold** and __italic__. Models often write
         *italic* or _italic_, which would show up as literal symbols."""
         text = re.sub(r"(?<![*\w])\*(?![*\s])(.+?)(?<![*\s])\*(?![*\w])", r"__\1__", text)
         text = re.sub(r"(?<![_\w])_(?![_\s])(.+?)(?<![_\s])_(?![_\w])", r"__\1__", text)
@@ -806,9 +911,12 @@ class App:
         daily = (self.t("daily_state_on", hour=f"{self.cfg.daily_summary_hour:02d}")
                  if self.cfg.daily_summary else self.t("daily_state_off"))
         on, off = self.t("on"), self.t("off")
+        ai = (self.t(f"ai_name_{self.cfg.ai_provider}") + f" ({self.rewriter.model})"
+              if self.cfg.ai_provider else self.t("ai_not_configured"))
         return "\n".join([
             self.t("settings_header"), "",
             self.t("settings_channels_line", n=len(self.cfg.sources)),
+            self.t("settings_ai_line", state=ai),
             self.t("settings_review_line", state=on if self.cfg.review_mode else off),
             self.t("settings_media_line", state=on if self.cfg.include_media else off),
             self.t("settings_daily_line", state=daily),
@@ -819,11 +927,32 @@ class App:
         return [
             [Button.inline(self.t("btn_channels"), "st:channels"),
              Button.inline(self.t("btn_writing_style"), "st:prompt")],
+            [Button.inline(self.t("btn_ai"), "st:ai")],
             [Button.inline(self.t("btn_review_toggle", state=on if self.cfg.review_mode else off), "st:review")],
             [Button.inline(self.t("btn_media_toggle", state=on if self.cfg.include_media else off), "st:media")],
             [Button.inline(self.t("btn_daily"), "st:daily"), Button.inline(self.t("btn_language"), "st:lang")],
             [Button.inline(self.t("btn_about"), "st:about"), Button.inline(self.t("btn_close"), "st:close")],
         ]
+
+    def ai_text(self) -> str:
+        provider = self.cfg.ai_provider
+        name = self.t(f"ai_name_{provider}") if provider else self.t("ai_not_configured")
+        text = self.t("ai_current", provider=name, model=self.rewriter.model or "—")
+        if provider == "local":
+            text += "\n" + self.t("ai_local_server_line", url=self.cfg.local_base_url)
+        return text
+
+    def ai_buttons(self):
+        rows = []
+        for p in ("gemini", "openai", "deepseek", "claude", "local"):
+            mark = "✅ " if p == self.cfg.ai_provider else ""
+            rows.append([Button.inline(f"{mark}{self.t(f'ai_name_{p}')}", f"st:aiset:{p}")])
+        if self.cfg.ai_provider:
+            rows.append([Button.inline(self.t("btn_change_model"), "st:aimodel")])
+            if self.cfg.ai_provider == "local":
+                rows.append([Button.inline(self.t("btn_change_server"), "st:aiserver")])
+        rows.append([Button.inline(self.t("btn_back"), "st:home")])
+        return rows
 
     def channels_text(self) -> str:
         if not self.source_entities:
@@ -961,6 +1090,34 @@ class App:
             await event.edit(self.t("about_text"), buttons=[[Button.inline(self.t("btn_back"), "st:home")]],
                               link_preview=False)
 
+        elif sub == "ai":
+            await event.answer()
+            await event.edit(self.ai_text(), buttons=self.ai_buttons())
+
+        elif sub == "aiset":
+            provider = arg
+            if provider not in Rewriter.PROVIDERS:
+                return
+            has_key = provider == "local" or bool(getattr(self.cfg, AI_KEY_FIELDS.get(provider, ("", ""))[0], False))
+            if has_key:
+                self.apply_ai_provider(provider)
+                await event.answer(self.t("ai_switched", provider=self.t(f"ai_name_{provider}")))
+                await event.edit(self.ai_text(), buttons=self.ai_buttons())
+            else:
+                self.settings_wait = f"ai_key:{provider}"
+                await event.answer()
+                await event.edit(self.t(f"ai_setup_{provider}"), buttons=None)
+
+        elif sub == "aimodel":
+            self.settings_wait = "ai_model"
+            await event.answer()
+            await event.edit(self.t("ai_model_prompt", current=self.rewriter.model), buttons=None)
+
+        elif sub == "aiserver":
+            self.settings_wait = "ai_server"
+            await event.answer()
+            await event.edit(self.t("ai_server_prompt", current=self.cfg.local_base_url), buttons=None)
+
     async def try_add_channel(self, event, ref: str) -> None:
         # a forwarded message identifies its channel more reliably than typed text
         fwd = getattr(event.message, "forward", None)
@@ -1019,6 +1176,27 @@ class App:
             update_env({"DAILY_SUMMARY_HOUR_UTC": str(hour)})
             self.restart_summary_loop()
             await event.reply(self.t("daily_hour_set", hour=f"{hour:02d}"))
+
+        elif mode and mode.startswith("ai_key:"):
+            provider = mode.split(":", 1)[1]
+            attr, env_name = AI_KEY_FIELDS[provider]
+            setattr(self.cfg, attr, text)
+            update_env({env_name: text})
+            self.apply_ai_provider(provider)
+            await event.reply(self.t("ai_switched", provider=self.t(f"ai_name_{provider}")))
+
+        elif mode == "ai_model":
+            self.cfg.ai_model = text
+            update_env({"AI_MODEL": text})
+            self.rewriter = Rewriter(self.cfg)
+            await event.reply(self.t("ai_model_set", model=text))
+
+        elif mode == "ai_server":
+            self.cfg.local_base_url = text
+            update_env({"LOCAL_BASE_URL": text})
+            if self.cfg.ai_provider == "local":
+                self.rewriter = Rewriter(self.cfg)
+            await event.reply(self.t("ai_server_set", url=text))
 
     async def on_command(self, event) -> None:
         if not event.is_private or event.sender_id != self.cfg.admin_id:

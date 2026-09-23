@@ -8,7 +8,7 @@
   "btn_post": "✅ Post",
   "btn_edit": "✏️ Edit",
   "btn_skip": "🗑 Skip",
-  "btn_rewrite": "🔄 Rewrite with Gemini",
+  "btn_rewrite": "🔄 Rewrite with AI",
   "btn_next": "Next ➡️",
   "btn_cancel": "✖ Cancel",
   "btn_keep_text": "↩️ Keep current text",
@@ -99,5 +99,30 @@
   "credits_line": "Made by LunaTheWolf (@Vov4ik3), built with Claude (Anthropic) 🤍",
 
   "btn_about": "ℹ️ About",
-  "about_text": "ℹ️ About\n\nChannel Rewriter watches Telegram channels, rewrites new posts with Gemini, and posts them to your channel or group.\n\nMade by LunaTheWolf (@Vov4ik3)\nBuilt with Claude (Anthropic)\n\ngithub.com/Vov4ik3/Channel-rewriter-bot"
+  "about_text": "ℹ️ About\n\nChannel Rewriter watches Telegram channels, rewrites new posts with Gemini, and posts them to your channel or group.\n\nMade by LunaTheWolf (@Vov4ik3)\nBuilt with Claude (Anthropic)\n\ngithub.com/Vov4ik3/Channel-rewriter-bot",
+
+  "btn_ai": "🤖 AI Provider",
+  "settings_ai_line": "🤖 AI: {state}",
+  "ai_not_configured": "not set",
+  "ai_current": "🤖 AI: {provider}\nModel: {model}",
+  "ai_local_server_line": "🌐 Server: {url}",
+  "ai_choose_prompt": "🤖 Which AI should rewrite your posts?",
+  "ai_switched": "Switched to {provider}",
+  "btn_change_model": "✏️ Change model",
+  "btn_change_server": "🌐 Change server address",
+  "ai_model_prompt": "✏️ Send the model name to use (current: {current}).",
+  "ai_model_set": "✅ Model set to {model}.",
+  "ai_server_prompt": "🌐 Send the local server's OpenAI-compatible base URL (current: {current}). Example: http://localhost:11434/v1 for Ollama.",
+  "ai_server_set": "✅ Server address set to {url}.",
+
+  "ai_name_gemini": "Gemini",
+  "ai_name_openai": "OpenAI (ChatGPT)",
+  "ai_name_deepseek": "DeepSeek",
+  "ai_name_claude": "Claude",
+  "ai_name_local": "Local (self-hosted)",
+
+  "ai_setup_gemini": "🔑 Gemini needs an API key. Free, no card needed:\n1. Go to aistudio.google.com\n2. Click \"Get API key\"\n3. Send the key here as a message.",
+  "ai_setup_openai": "🔑 OpenAI needs an API key (paid, no free tier):\n1. Go to platform.openai.com/api-keys\n2. Create a new key\n3. Send it here as a message.",
+  "ai_setup_deepseek": "🔑 DeepSeek needs an API key (paid, cheap):\n1. Go to platform.deepseek.com\n2. Create a new key\n3. Send it here as a message.",
+  "ai_setup_claude": "🔑 Claude needs an API key (paid, no free tier):\n1. Go to console.anthropic.com\n2. Create a new key\n3. Send it here as a message."
 }

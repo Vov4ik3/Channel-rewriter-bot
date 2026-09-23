@@ -1,12 +1,13 @@
 # Channel Rewriter
 
-Watches Telegram channels. When a new post shows up, Gemini writes a fresh
-version of it and the bot posts that to your group, with the original's
-photos/videos. Published posts carry no links. In review mode, the drafts you
-get in DMs link to the original, so you can check the source.
+Watches Telegram channels. When a new post shows up, an AI (Gemini, OpenAI,
+DeepSeek, Claude, or a local model — your choice) writes a fresh version of
+it and the bot posts that to your group, with the original's photos/videos.
+Published posts carry no links. In review mode, the drafts you get in DMs
+link to the original, so you can check the source.
 
 ```
-source channels ──> reader account (Telethon) ──> Gemini (free API) ──> your group
+source channels ──> reader account (Telethon) ──> your AI provider ──> your group
                                                         │
                                            review mode: drafts to your DMs
                                            with ✅ Post / ✏️ Edit / 🗑 Skip / 🔄 Rewrite
@@ -26,9 +27,11 @@ source channels ──> reader account (Telethon) ──> Gemini (free API) ─�
 | What | Where |
 |---|---|
 | `TG_API_ID`, `TG_API_HASH` | Log in to [my.telegram.org](https://my.telegram.org) **with the reader account**, then *API development tools* and create an app (any name). |
-| `GEMINI_API_KEY` | [aistudio.google.com](https://aistudio.google.com), then *Get API key*. Free, no card needed. |
 | `BOT_TOKEN` (optional) | [@BotFather](https://t.me/BotFather), then `/newbot`. |
 | `ADMIN_ID` (optional) | DM [@userinfobot](https://t.me/userinfobot) from **your own** account. |
+
+You don't need an AI provider key yet — leave that whole section of `.env`
+blank and set it up from inside Telegram instead, see **section 8.5**.
 
 With the reader account, **join every source channel**. It only sees
 channels it is subscribed to.
@@ -78,8 +81,8 @@ Edit **`prompt.txt`**. This is the whole "personality" of the bot: tone,
 length, language, what to skip. It is re-read for every post, so changes apply
 without a restart.
 
-To make Gemini drop a post, the prompt tells it to answer `SKIP`. By default it
-skips ads, giveaways and posts with no content. Add your own rules there,
+To make the AI drop a post, the prompt tells it to answer `SKIP`. By default
+it skips ads, giveaways and posts with no content. Add your own rules there,
 e.g. *"skip anything about crypto"*.
 
 ## 5. Review mode
@@ -106,7 +109,7 @@ draft comes to your DMs first:
   Only one draft is edited at a time: starting an edit on another draft puts
   the first one back unchanged.
 - 🗑 **Skip** drops it.
-- 🔄 **Rewrite with Gemini** asks for a whole new version.
+- 🔄 **Rewrite** asks the AI for a whole new version.
 
 `**bold**` and `__italic__` in your text are formatted when posted.
 
@@ -164,6 +167,34 @@ The first time a language is chosen, the bot also sends a short one-time
 credits message. The same info is always available from **ℹ️ About** in
 `/settings`.
 
+## 8.5 AI Provider — no `.env` editing needed
+
+Leave the whole AI section of `.env` blank and, the first time the bot
+starts (needs `BOT_TOKEN` + `ADMIN_ID`), it DMs you **🤖 Which AI should
+rewrite your posts?** with one button per provider:
+
+| Provider | Cost | Where to get a key |
+|---|---|---|
+| **Gemini** | Free, no card | [aistudio.google.com](https://aistudio.google.com) → *Get API key* |
+| **OpenAI (ChatGPT)** | Paid | [platform.openai.com/api-keys](https://platform.openai.com/api-keys) |
+| **DeepSeek** | Paid, cheap | [platform.deepseek.com](https://platform.deepseek.com) |
+| **Claude (Anthropic)** | Paid | [console.anthropic.com](https://console.anthropic.com) |
+| **Local (self-hosted)** | Free | Any OpenAI-compatible server, e.g. [Ollama](https://ollama.com) |
+
+Tap one: if it already has a key saved, it switches immediately; otherwise
+the bot explains what to get and where, then saves whatever you send as a
+message. **Local** needs no key, just a running server — default address is
+`http://localhost:11434/v1` (Ollama's default), changeable from the same menu,
+along with which model name to use (must match what you've pulled locally).
+
+Reachable anytime from **🤖 AI Provider** in `/settings`, including **✏️
+Change model** if you want something other than the default for whichever
+provider is active (e.g. a cheaper Claude model for this repetitive,
+high-volume task than the default).
+
+If you already had `GEMINI_API_KEY` set from before this feature existed,
+nothing changes — it's picked up automatically, no prompt shown.
+
 ## Credits
 
 Made by [LunaTheWolf](https://github.com/Vov4ik3), built with
@@ -175,11 +206,11 @@ Made by [LunaTheWolf](https://github.com/Vov4ik3), built with
 |---|---|---|
 | `SOURCE_CHANNELS` | | `@name`, `t.me/name` or numeric id, comma-separated |
 | `TARGET_CHAT` | | `@name` or numeric id (`-100…`) |
-| `GEMINI_MODEL` | `gemini-flash-latest` | Any free-tier Flash model works |
+| `AI_PROVIDER` / `AI_MODEL` | | See **section 8.5** — usually set via `/settings`, not by hand |
 | `MIN_TEXT_LENGTH` | `50` | Shorter posts are ignored |
 | `INCLUDE_MEDIA` | `1` | Re-post the original's photos/videos |
 | `MAX_MEDIA_MB` | `45` | Bigger files are dropped (bot upload limit is 50 MB) |
-| `GEMINI_DELAY_SECONDS` | `6` | Pause between Gemini calls |
+| `AI_DELAY_SECONDS` | `6` | Pause between AI requests |
 
 ## Always on with systemd (Linux)
 
@@ -205,11 +236,15 @@ journalctl --user -u channel-rewriter.service -f
 - **Albums** are re-posted as albums, with the text as the caption. If the text
   is longer than Telegram's 1024-character caption limit, it goes as a
   separate message right after the media.
-- **Rate limits.** The free tier allows roughly 10–15 requests a minute.
-  Posts are processed one at a time with a pause between them. On a "429"
-  error the bot waits and retries.
-- **Privacy.** On the free tier Google may use requests to improve its
-  models. That's fine for public channel posts.
+- **Rate limits.** Posts are processed one at a time with a pause between
+  them (`AI_DELAY_SECONDS`). On a rate-limit or server error the bot waits
+  and retries a few times before giving up on that post.
+- **Privacy.** Some providers' free/cheap tiers may use requests to improve
+  their models (Gemini's free tier does). Fine for public channel posts;
+  worth knowing if that matters to you.
+- **No AI configured yet.** Posts that arrive before you've picked an AI
+  provider (via the first-run DM or `/settings`) are logged and dropped, not
+  queued up — they won't retroactively get rewritten once you set one up.
 
 ## Troubleshooting
 
@@ -218,8 +253,9 @@ journalctl --user -u channel-rewriter.service -f
 | `Reader account isn't logged in` | Run `login.py` (or setup again). |
 | `Can't open source channel` | The reader account isn't subscribed, or the name is wrong. `login.py` lists the right ids. |
 | `Can't open TARGET_CHAT` | For a bot: add it to the group, post any message there, restart. For the reader account: it must be a member. |
-| `Gemini error 429` again and again | You've hit the daily free limit. Switch `GEMINI_MODEL` to a Flash-Lite model (AI Studio lists the current names; its limits are higher) or raise `GEMINI_DELAY_SECONDS`. |
-| `Gemini returned an empty answer` | The post tripped Gemini's safety filter, so it was dropped. |
+| `No AI provider configured; post ... dropped` | Pick one via the first-run DM or `/settings` > AI Provider. |
+| `<provider> request failed` / retrying repeatedly | Usually a bad/expired key or a rate limit. Check the key in `/settings` > AI Provider, or raise `AI_DELAY_SECONDS`. |
+| `<provider> returned an empty answer` | The post tripped a safety/content filter, so it was dropped. |
 | Nothing happens at all | Check that new posts actually appeared. Only posts published *after* the bot started count. |
 
 ## A note on content
