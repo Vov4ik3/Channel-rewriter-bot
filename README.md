@@ -148,6 +148,15 @@ restart. Good for handing the bot off to someone non-technical.
 Every change here is written straight into `.env`, so it survives a
 restart, and takes effect immediately without one.
 
+## 8. Language
+
+The bot's own messages and buttons (not the rewritten posts themselves,
+which stay in whatever language `prompt.txt` and the source posts are in)
+can be English or Russian. Set `LANG=en` or `LANG=ru` in `.env`, or leave it
+blank: the first time the bot starts with `BOT_TOKEN` + `ADMIN_ID` set, it
+DMs you 🌐 **Choose language**. Change it later anytime from **🌐 Language**
+in `/settings`. Translations live in `locales/en.json` and `locales/ru.json`.
+
 Drafts are kept in memory, so restarting the bot expires any that haven't been
 answered yet.
 

@@ -5,12 +5,14 @@ and publishes them to your group.
     python login.py   # once, to log the reader account in
     python bot.py     # run the bot (or tray_bot.py on Windows for no console)
 
-All settings live in .env; the rewriting style lives in prompt.txt.
+All settings live in .env; the rewriting style lives in prompt.txt; the
+bot's own UI language (buttons/messages) lives in locales/*.json.
 """
 from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import os
 import re
@@ -38,6 +40,8 @@ DB_PATH = BASE_DIR / "seen.db"
 LOG_PATH = BASE_DIR / "bot.log"
 PROMPT_PATH = BASE_DIR / "prompt.txt"
 ENV_PATH = BASE_DIR / ".env"
+LOCALES_DIR = BASE_DIR / "locales"
+LANGUAGES = ("en", "ru")
 USER_SESSION = str(BASE_DIR / "reader")    # -> reader.session
 BOT_SESSION = str(BASE_DIR / "poster")     # -> poster.session
 
@@ -94,6 +98,15 @@ def update_env(updates: dict[str, str]) -> None:
     ENV_PATH.write_text("\n".join(out) + "\n", encoding="utf-8")
 
 
+_locale_cache: dict[str, dict[str, str]] = {}
+
+
+def load_locale(lang: str) -> dict[str, str]:
+    if lang not in _locale_cache:
+        _locale_cache[lang] = json.loads((LOCALES_DIR / f"{lang}.json").read_text(encoding="utf-8"))
+    return _locale_cache[lang]
+
+
 # ---------------------------------------------------------------- config ---
 
 class ConfigError(Exception):
@@ -142,6 +155,7 @@ class Config:
     gemini_delay: float = 6.0
     daily_summary: bool = True
     daily_summary_hour: int = 18
+    lang: str = ""
 
     @classmethod
     def load(cls) -> "Config":
@@ -169,11 +183,17 @@ class Config:
             gemini_delay=float(_env("GEMINI_DELAY_SECONDS", "6")),
             daily_summary=_env_bool("DAILY_SUMMARY", True),
             daily_summary_hour=int(_env("DAILY_SUMMARY_HOUR_UTC", "18")),
+            lang=_env("LANG").strip().lower(),
         )
+        if cfg.lang not in ("", *LANGUAGES):
+            cfg.lang = ""
         if cfg.review_mode and not (cfg.bot_token and cfg.admin_id):
             raise ConfigError("REVIEW_MODE=1 needs both BOT_TOKEN and ADMIN_ID")
         if not PROMPT_PATH.exists():
             raise ConfigError("prompt.txt is missing next to bot.py")
+        for lang in LANGUAGES:
+            if not (LOCALES_DIR / f"{lang}.json").exists():
+                raise ConfigError(f"locales/{lang}.json is missing next to bot.py")
         return cfg
 
 
@@ -320,6 +340,11 @@ class App:
     def poster(self) -> TelegramClient:
         return self.bot or self.user
 
+    def t(self, key: str, **kwargs) -> str:
+        strings = load_locale(self.cfg.lang or "en")
+        template = strings.get(key) or load_locale("en").get(key, key)
+        return template.format(**kwargs) if kwargs else template
+
     # ---- startup / shutdown
 
     async def start(self) -> None:
@@ -381,6 +406,12 @@ class App:
             log.info("Daily summary prompt at %02d:00 UTC", self.cfg.daily_summary_hour)
         elif self.cfg.daily_summary:
             log.info("Daily summary is on but needs BOT_TOKEN and ADMIN_ID to send it")
+        if not self.cfg.lang and self.bot and self.cfg.admin_id:
+            try:
+                await self.bot.send_message(self.cfg.admin_id, self.t("choose_language"),
+                                            buttons=self.language_buttons())
+            except Exception:
+                log.exception("Language prompt failed")
         worker = asyncio.create_task(self.worker())
         self.summary_task = asyncio.create_task(self.daily_summary_loop())
         try:
@@ -541,25 +572,23 @@ class App:
     # Edit: 1) pick which images to keep (toggle buttons), 2) bot sends the
     # current text as a copyable block, admin sends back the new text.
 
-    @staticmethod
-    def review_buttons(draft_id: str):
-        return [[Button.inline("✅ Post", f"ok:{draft_id}"),
-                 Button.inline("✏️ Edit", f"ed:{draft_id}"),
-                 Button.inline("🗑 Skip", f"no:{draft_id}")],
-                [Button.inline("🔄 Rewrite with Gemini", f"re:{draft_id}")]]
+    def review_buttons(self, draft_id: str):
+        return [[Button.inline(self.t("btn_post"), f"ok:{draft_id}"),
+                 Button.inline(self.t("btn_edit"), f"ed:{draft_id}"),
+                 Button.inline(self.t("btn_skip"), f"no:{draft_id}")],
+                [Button.inline(self.t("btn_rewrite"), f"re:{draft_id}")]]
 
-    @staticmethod
-    def media_buttons(draft_id: str, post: Post):
+    def media_buttons(self, draft_id: str, post: Post):
         toggles = [Button.inline(f"{'✅' if i not in post.excluded else '⬜'} {i + 1}", f"tg:{draft_id}:{i}")
                    for i in range(len(post.files))]
         rows = [toggles[i:i + 5] for i in range(0, len(toggles), 5)]
-        rows.append([Button.inline("Next ➡️", f"md:{draft_id}"), Button.inline("✖ Cancel", f"cx:{draft_id}")])
+        rows.append([Button.inline(self.t("btn_next"), f"md:{draft_id}"),
+                     Button.inline(self.t("btn_cancel"), f"cx:{draft_id}")])
         return rows
 
-    @staticmethod
-    def text_buttons(draft_id: str):
-        return [[Button.inline("↩️ Keep current text", f"ek:{draft_id}"),
-                 Button.inline("✖ Cancel", f"cx:{draft_id}")]]
+    def text_buttons(self, draft_id: str):
+        return [[Button.inline(self.t("btn_keep_text"), f"ek:{draft_id}"),
+                 Button.inline(self.t("btn_cancel"), f"cx:{draft_id}")]]
 
     def review_text(self, post: Post) -> str:
         title = post.source_title.replace("[", "(").replace("]", ")")
@@ -567,7 +596,7 @@ class App:
         when = f"\n🕒 {format_age(post.post_date)}"
         media = ""
         if post.files:
-            media = f"\n🖼 {len(post.chosen_files)} of {len(post.files)} images will be posted"
+            media = "\n" + self.t("images_count", chosen=len(post.chosen_files), total=len(post.files))
         body = self.fix_formatting(post.new_text)
         return f"{source}{when}{media}\n\n{body}"[:MESSAGE_LIMIT]
 
@@ -598,8 +627,7 @@ class App:
         self.editing = draft_id
         await self.bot.send_message(
             self.cfg.admin_id,
-            "✏️ Send the new text as a message.\n"
-            "The current text is below: tap it to copy, edit, and send it back.",
+            self.t("edit_text_prompt"),
             buttons=self.text_buttons(draft_id))
         text = post.new_text
         await self.bot.send_message(self.cfg.admin_id, text, parse_mode=None,
@@ -611,20 +639,20 @@ class App:
         if old_id and old_id != draft_id and old_id in self.pending:
             old = self.pending[old_id]
             old.restore()
-            await self.bot.send_message(self.cfg.admin_id, "Previous edit cancelled, here's that draft again:")
+            await self.bot.send_message(self.cfg.admin_id, self.t("edit_cancelled_other"))
             await self.send_draft(old_id, old)
         self.editing = None
 
     async def on_callback(self, event) -> None:
         if event.sender_id != self.cfg.admin_id:
-            await event.answer("Not allowed")
+            await event.answer(self.t("not_allowed"))
             return
         action, _, rest = event.data.decode().partition(":")
 
         if action == "ds":
             if rest == "skip":
-                await event.answer("Skipped")
-                await event.edit("Not today, got it.", buttons=None)
+                await event.answer(self.t("skipped"))
+                await event.edit(self.t("not_today_ack"), buttons=None)
             else:
                 await event.answer()
                 await self.send_daily_summary(event)
@@ -637,7 +665,7 @@ class App:
         draft_id, _, arg = rest.partition(":")
         post = self.pending.get(draft_id)
         if post is None:
-            await event.answer("This draft expired (bot was restarted?)", alert=True)
+            await event.answer(self.t("draft_expired"), alert=True)
             await event.edit(buttons=None)
             return
 
@@ -645,13 +673,13 @@ class App:
             self.pending.pop(draft_id)
             if self.editing == draft_id:
                 self.editing = None
-            await event.answer("Posting…")
+            await event.answer(self.t("posting"))
             try:
                 await self.publish(post)
-                await event.edit("✅ Posted\n\n" + self.review_text(post), buttons=None, link_preview=False)
+                await event.edit(self.t("posted_prefix") + self.review_text(post), buttons=None, link_preview=False)
             except Exception as e:
                 log.exception("Publishing draft %s failed", draft_id)
-                await event.edit(f"❌ Failed to post: {e}"[:MESSAGE_LIMIT], buttons=None)
+                await event.edit(self.t("post_failed", error=e)[:MESSAGE_LIMIT], buttons=None)
 
         elif action == "no":
             self.pending.pop(draft_id)
@@ -659,11 +687,11 @@ class App:
                 self.editing = None
             post.cleanup()
             self.stats["skipped"] += 1
-            await event.answer("Skipped")
-            await event.edit("🗑 Skipped\n\n" + self.review_text(post), buttons=None, link_preview=False)
+            await event.answer(self.t("skipped"))
+            await event.edit(self.t("skipped_prefix") + self.review_text(post), buttons=None, link_preview=False)
 
         elif action == "re":
-            await event.answer("Rewriting…")
+            await event.answer(self.t("rewriting"))
             new = await self.rewriter.rewrite(post.text, post.source_title)
             if new and new != Rewriter.SKIP:
                 post.new_text = new
@@ -673,12 +701,12 @@ class App:
             await event.answer()
             await self.cancel_other_edit(draft_id)
             post.snapshot()
-            await event.edit("✏️ Editing…\n\n" + self.review_text(post), buttons=None, link_preview=False)
+            await event.edit(self.t("editing_prefix") + self.review_text(post), buttons=None, link_preview=False)
             if post.files:
                 await self.send_media_preview(post)
                 await self.bot.send_message(
                     self.cfg.admin_id,
-                    "🖼 Which images should be posted? Tap a number to include or exclude it.",
+                    self.t("which_images"),
                     buttons=self.media_buttons(draft_id, post))
             else:
                 await self.ask_for_text(draft_id, post)
@@ -686,26 +714,28 @@ class App:
         elif action == "tg":
             i = int(arg)
             post.excluded.symmetric_difference_update({i})
-            await event.answer(f"Image {i + 1} {'excluded' if i in post.excluded else 'included'}")
+            state = self.t("excluded") if i in post.excluded else self.t("included")
+            await event.answer(self.t("image_toggled", n=i + 1, state=state))
             await event.edit(buttons=self.media_buttons(draft_id, post))
 
         elif action == "md":
             await event.answer()
             chosen = [str(i + 1) for i in range(len(post.files)) if i not in post.excluded]
-            await event.edit(f"🖼 Images: {', '.join(chosen) if chosen else 'none (text only)'}", buttons=None)
+            listing = ", ".join(chosen) if chosen else self.t("images_none")
+            await event.edit(self.t("images_chosen", list=listing), buttons=None)
             await self.ask_for_text(draft_id, post)
 
         elif action == "ek":
-            await event.answer("Text kept")
+            await event.answer(self.t("text_kept"))
             self.editing = None
-            await event.edit("↩️ Kept the current text", buttons=None)
+            await event.edit(self.t("kept_text_prefix"), buttons=None)
             await self.send_draft(draft_id, post)
 
         elif action == "cx":
-            await event.answer("Edit cancelled")
+            await event.answer(self.t("edit_cancelled"))
             self.editing = None
             post.restore()
-            await event.edit("✖ Edit cancelled", buttons=None)
+            await event.edit(self.t("edit_cancelled_prefix"), buttons=None)
             await self.send_draft(draft_id, post)
 
     async def on_admin_message(self, event) -> None:
@@ -745,9 +775,9 @@ class App:
             try:
                 await self.bot.send_message(
                     self.cfg.admin_id,
-                    "📰 Daily summary time. Want to see what got posted today?",
-                    buttons=[[Button.inline("📰 Show summary", "ds:show"),
-                              Button.inline("Not today", "ds:skip")]])
+                    self.t("daily_prompt"),
+                    buttons=[[Button.inline(self.t("btn_show_summary"), "ds:show"),
+                              Button.inline(self.t("btn_not_today"), "ds:skip")]])
             except Exception:
                 log.exception("Daily summary prompt failed")
             cutoff = datetime.now(timezone.utc) - timedelta(days=2)
@@ -759,12 +789,12 @@ class App:
         today = datetime.now(timezone.utc).date()
         todays = [e for e in self.posted_log if e[0].date() == today]
         if not todays:
-            await event.edit("📰 No new posts today.", buttons=None)
+            await event.edit(self.t("no_posts_today"), buttons=None)
             return
-        await event.edit(f"📰 {len(todays)} post{'s' if len(todays) != 1 else ''} today:", buttons=None)
+        await event.edit(self.t("posts_today_header", n=len(todays)), buttons=None)
         for _, title, text, source_link, target_link in todays:
             title = title.replace("[", "(").replace("]", ")")
-            links = [f"📢 [Posted]({target_link})"] if target_link else []
+            links = [f"📢 [{self.t('posted_link_label')}]({target_link})"] if target_link else []
             links.append(f"🔗 [{title}]({source_link})" if source_link else f"🔗 {title}")
             body = self.fix_formatting(text)
             msg = f"{' · '.join(links)}\n\n{body}"[:MESSAGE_LIMIT]
@@ -773,31 +803,35 @@ class App:
     # ---- settings (for a non-technical admin: no file editing, no restart)
 
     def settings_text(self) -> str:
-        daily = f"ON, {self.cfg.daily_summary_hour:02d}:00 UTC" if self.cfg.daily_summary else "OFF"
-        return (
-            "⚙️ Settings\n\n"
-            f"📡 Source channels: {len(self.cfg.sources)}\n"
-            f"🔄 Review mode: {'ON' if self.cfg.review_mode else 'OFF'}\n"
-            f"🖼 Media: {'ON' if self.cfg.include_media else 'OFF'}\n"
-            f"⏰ Daily summary: {daily}"
-        )
+        daily = (self.t("daily_state_on", hour=f"{self.cfg.daily_summary_hour:02d}")
+                 if self.cfg.daily_summary else self.t("daily_state_off"))
+        on, off = self.t("on"), self.t("off")
+        return "\n".join([
+            self.t("settings_header"), "",
+            self.t("settings_channels_line", n=len(self.cfg.sources)),
+            self.t("settings_review_line", state=on if self.cfg.review_mode else off),
+            self.t("settings_media_line", state=on if self.cfg.include_media else off),
+            self.t("settings_daily_line", state=daily),
+        ])
 
     def settings_buttons(self):
+        on, off = self.t("on"), self.t("off")
         return [
-            [Button.inline("📡 Channels", "st:channels"), Button.inline("📝 Writing style", "st:prompt")],
-            [Button.inline(f"🔄 Review mode: {'ON' if self.cfg.review_mode else 'OFF'}", "st:review")],
-            [Button.inline(f"🖼 Media: {'ON' if self.cfg.include_media else 'OFF'}", "st:media")],
-            [Button.inline("⏰ Daily summary", "st:daily")],
-            [Button.inline("✖ Close", "st:close")],
+            [Button.inline(self.t("btn_channels"), "st:channels"),
+             Button.inline(self.t("btn_writing_style"), "st:prompt")],
+            [Button.inline(self.t("btn_review_toggle", state=on if self.cfg.review_mode else off), "st:review")],
+            [Button.inline(self.t("btn_media_toggle", state=on if self.cfg.include_media else off), "st:media")],
+            [Button.inline(self.t("btn_daily"), "st:daily"), Button.inline(self.t("btn_language"), "st:lang")],
+            [Button.inline(self.t("btn_close"), "st:close")],
         ]
 
     def channels_text(self) -> str:
         if not self.source_entities:
-            return "📡 Channels\n\nNone configured."
-        lines = ["📡 Channels:"]
+            return self.t("channels_empty")
+        lines = [self.t("channels_header")]
         for ref, ent in self.source_entities:
             title = getattr(ent, "title", None) if ent else None
-            lines.append(f"• {title or ref}" + ("" if ent else " ⚠️ can't open"))
+            lines.append(f"• {title or ref}" + ("" if ent else self.t("channel_broken")))
         return "\n".join(lines)
 
     def channels_buttons(self):
@@ -805,21 +839,25 @@ class App:
         for i, (ref, ent) in enumerate(self.source_entities):
             label = (getattr(ent, "title", None) or ref) if ent else f"⚠️ {ref}"
             rows.append([Button.inline(f"❌ {label[:24]}", f"st:rmch:{i}")])
-        rows.append([Button.inline("➕ Add channel", "st:addch")])
-        rows.append([Button.inline("⬅ Back", "st:home")])
+        rows.append([Button.inline(self.t("btn_add_channel"), "st:addch")])
+        rows.append([Button.inline(self.t("btn_back"), "st:home")])
         return rows
 
     def daily_text(self) -> str:
         if not self.cfg.daily_summary:
-            return "⏰ Daily summary: OFF"
-        return f"⏰ Daily summary: ON\nPrompt sent at {self.cfg.daily_summary_hour:02d}:00 UTC"
+            return self.t("daily_off")
+        return self.t("daily_on", hour=f"{self.cfg.daily_summary_hour:02d}")
 
     def daily_buttons(self):
         return [
-            [Button.inline("🔕 Turn off" if self.cfg.daily_summary else "🔔 Turn on", "st:dailytoggle")],
-            [Button.inline("🕒 Change hour", "st:dailyhour")],
-            [Button.inline("⬅ Back", "st:home")],
+            [Button.inline(self.t("btn_turn_off") if self.cfg.daily_summary else self.t("btn_turn_on"),
+                            "st:dailytoggle")],
+            [Button.inline(self.t("btn_change_hour"), "st:dailyhour")],
+            [Button.inline(self.t("btn_back"), "st:home")],
         ]
+
+    def language_buttons(self):
+        return [[Button.inline("Русский", "st:setlang:ru"), Button.inline("English", "st:setlang:en")]]
 
     async def on_settings(self, event) -> None:
         if not event.is_private or event.sender_id != self.cfg.admin_id:
@@ -844,40 +882,40 @@ class App:
         elif sub == "rmch":
             idx = int(arg)
             if len(self.cfg.sources) <= 1:
-                await event.answer("Can't remove the last channel — add another first", alert=True)
+                await event.answer(self.t("channel_last_one"), alert=True)
                 return
             if 0 <= idx < len(self.cfg.sources):
                 removed = self.cfg.sources.pop(idx)
                 update_env({"SOURCE_CHANNELS": ",".join(self.cfg.sources)})
                 await self.refresh_source_handlers()
-                await event.answer(f"Removed {removed}")
+                await event.answer(self.t("channel_removed", ref=removed))
             await event.edit(self.channels_text(), buttons=self.channels_buttons())
 
         elif sub == "addch":
             self.settings_wait = "add_channel"
             await event.answer()
-            await event.edit(
-                "➕ Send the channel's @username or t.me link, or forward any message from it.\n"
-                "The reader account needs to be able to see it — public channels get joined automatically.",
-                buttons=None)
+            await event.edit(self.t("add_channel_prompt"), buttons=None)
 
         elif sub == "review":
             self.cfg.review_mode = not self.cfg.review_mode
             update_env({"REVIEW_MODE": "1" if self.cfg.review_mode else "0"})
-            await event.answer(f"Review mode {'ON' if self.cfg.review_mode else 'OFF'}")
+            state = self.t("on") if self.cfg.review_mode else self.t("off")
+            await event.answer(self.t("review_toggled", state=state))
             await event.edit(self.settings_text(), buttons=self.settings_buttons())
 
         elif sub == "media":
             self.cfg.include_media = not self.cfg.include_media
             update_env({"INCLUDE_MEDIA": "1" if self.cfg.include_media else "0"})
-            await event.answer(f"Media {'ON' if self.cfg.include_media else 'OFF'}")
+            state = self.t("on") if self.cfg.include_media else self.t("off")
+            await event.answer(self.t("media_toggled", state=state))
             await event.edit(self.settings_text(), buttons=self.settings_buttons())
 
         elif sub == "prompt":
             await event.answer()
             await event.edit(
-                "📝 Current writing style is below (this is the bot's whole personality/tone).",
-                buttons=[[Button.inline("✏️ Edit", "st:editprompt"), Button.inline("⬅ Back", "st:home")]])
+                self.t("prompt_header"),
+                buttons=[[Button.inline(self.t("btn_edit_style"), "st:editprompt"),
+                          Button.inline(self.t("btn_back"), "st:home")]])
             text = PROMPT_PATH.read_text(encoding="utf-8")
             await self.bot.send_message(self.cfg.admin_id, text, parse_mode=None,
                                         formatting_entities=[MessageEntityPre(0, utf16_len(text), "")])
@@ -885,10 +923,7 @@ class App:
         elif sub == "editprompt":
             self.settings_wait = "edit_prompt"
             await event.answer()
-            await event.edit(
-                "✏️ Send the new writing style as a message. It replaces the current one "
-                "entirely, and applies to the next post — no restart needed.",
-                buttons=None)
+            await event.edit(self.t("edit_style_prompt"), buttons=None)
 
         elif sub == "daily":
             await event.answer()
@@ -898,13 +933,25 @@ class App:
             self.cfg.daily_summary = not self.cfg.daily_summary
             update_env({"DAILY_SUMMARY": "1" if self.cfg.daily_summary else "0"})
             self.restart_summary_loop()
-            await event.answer(f"Daily summary {'ON' if self.cfg.daily_summary else 'OFF'}")
+            state = self.t("on") if self.cfg.daily_summary else self.t("off")
+            await event.answer(self.t("daily_toggled", state=state))
             await event.edit(self.daily_text(), buttons=self.daily_buttons())
 
         elif sub == "dailyhour":
             self.settings_wait = "daily_hour"
             await event.answer()
-            await event.edit("🕒 Send the hour (0-23) in UTC for the daily prompt.", buttons=None)
+            await event.edit(self.t("daily_hour_prompt"), buttons=None)
+
+        elif sub == "lang":
+            await event.answer()
+            await event.edit(self.t("choose_language"), buttons=self.language_buttons())
+
+        elif sub == "setlang":
+            self.cfg.lang = arg if arg in LANGUAGES else "en"
+            update_env({"LANG": self.cfg.lang})
+            await event.answer()
+            await event.edit(self.t("language_saved"), buttons=None)
+            await self.bot.send_message(self.cfg.admin_id, self.settings_text(), buttons=self.settings_buttons())
 
     async def try_add_channel(self, event, ref: str) -> None:
         # a forwarded message identifies its channel more reliably than typed text
@@ -916,9 +963,7 @@ class App:
         try:
             entity = await self.user.get_entity(_chat_ref(ref))
         except Exception as e:
-            await event.reply(
-                f"❌ Couldn't find that channel ({e}).\n"
-                "Send an @username, t.me link, or forward a message from it.")
+            await event.reply(self.t("channel_not_found", error=e))
             return
 
         try:
@@ -932,7 +977,7 @@ class App:
             await self.refresh_source_handlers()
 
         title = getattr(entity, "title", ref)
-        await event.reply(f"✅ Added: {title}\nNow watching {len(self.cfg.sources)} channel(s).")
+        await event.reply(self.t("channel_added", title=title, n=len(self.cfg.sources)))
 
     async def handle_settings_input(self, event) -> None:
         text = (event.text or "").strip()
@@ -951,7 +996,7 @@ class App:
                 self.settings_wait = mode
                 return
             PROMPT_PATH.write_text(text + "\n", encoding="utf-8")
-            await event.reply("✅ Writing style updated. Applies to the next post — no restart needed.")
+            await event.reply(self.t("style_updated"))
 
         elif mode == "daily_hour":
             try:
@@ -960,33 +1005,35 @@ class App:
                     raise ValueError
             except ValueError:
                 self.settings_wait = mode
-                await event.reply("Send a number 0-23 (that's the UTC hour).")
+                await event.reply(self.t("daily_hour_invalid"))
                 return
             self.cfg.daily_summary_hour = hour
             update_env({"DAILY_SUMMARY_HOUR_UTC": str(hour)})
             self.restart_summary_loop()
-            await event.reply(f"✅ Daily summary time set to {hour:02d}:00 UTC.")
+            await event.reply(self.t("daily_hour_set", hour=f"{hour:02d}"))
 
     async def on_command(self, event) -> None:
         if not event.is_private or event.sender_id != self.cfg.admin_id:
             return
         s = self.stats
         uptime = int(time.time() - s["started"])
+        mode = self.t("mode_review") if self.cfg.review_mode else self.t("mode_auto")
         lines = [
-            f"🟢 Running for {uptime // 3600}h {uptime % 3600 // 60}m",
-            f"Mode: {'review' if self.cfg.review_mode else 'auto-post'}",
-            f"Posted: {s['posted']} · Skipped: {s['skipped']} · Failed: {s['failed']}",
-            f"In queue: {self.queue.qsize()} · Awaiting review: {len(self.pending)}",
-            f"Posted today: {sum(1 for e in self.posted_log if e[0].date() == datetime.now(timezone.utc).date())}",
+            self.t("status_uptime", h=uptime // 3600, m=uptime % 3600 // 60),
+            self.t("status_mode", mode=mode),
+            self.t("status_counts", posted=s["posted"], skipped=s["skipped"], failed=s["failed"]),
+            self.t("status_queue", queue=self.queue.qsize(), pending=len(self.pending)),
+            self.t("status_posted_today",
+                   n=sum(1 for e in self.posted_log if e[0].date() == datetime.now(timezone.utc).date())),
         ]
         if self.pending:
             drafts = sorted(self.pending.values(), key=lambda p: p.post_date)
             lines.append("")
-            lines.append("Awaiting review, oldest first:")
+            lines.append(self.t("status_pending_header"))
             for post in drafts[:10]:
                 lines.append(f"  • {format_age(post.post_date)} — {post.source_title}")
             if len(drafts) > 10:
-                lines.append(f"  …and {len(drafts) - 10} more")
+                lines.append(self.t("status_pending_more", n=len(drafts) - 10))
         await event.reply("\n".join(lines))
 
 
