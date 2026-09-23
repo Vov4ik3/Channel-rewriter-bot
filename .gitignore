@@ -1,0 +1,9 @@
+.env
+*.session
+*.session-journal
+venv/
+tmp/
+seen.db
+bot.log*
+panel_run.log
+__pycache__/

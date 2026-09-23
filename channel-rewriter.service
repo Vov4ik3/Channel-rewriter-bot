@@ -1,0 +1,15 @@
+[Unit]
+Description=Telegram channel rewriter bot (Gemini)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Change this to wherever you put the project
+WorkingDirectory=%h/channel-rewriter
+ExecStart=%h/channel-rewriter/venv/bin/python %h/channel-rewriter/bot.py
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target

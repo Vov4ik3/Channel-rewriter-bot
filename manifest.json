@@ -1,0 +1,6 @@
+{
+  "name": "channel-rewriter",
+  "entrypoint": "bot.py",
+  "venv": "venv",
+  "description": "Watches Telegram channels, rewrites new posts with Gemini, posts them to the group"
+}
