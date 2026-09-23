@@ -113,6 +113,9 @@ draft comes to your DMs first:
 Send `/status` to the bot at any time to see uptime, counts, queue size, and
 (if any drafts are waiting) each one's age, oldest first.
 
+Drafts are kept in memory, so restarting the bot expires any that haven't been
+answered yet.
+
 ## 6. Daily summary
 
 With `BOT_TOKEN` and `ADMIN_ID` set, the bot DMs you once a day (default
@@ -165,9 +168,6 @@ credits message. The same info is always available from **ℹ️ About** in
 
 Made by [LunaTheWolf](https://github.com/Vov4ik3), built with
 [Claude](https://claude.com) (Anthropic).
-
-Drafts are kept in memory, so restarting the bot expires any that haven't been
-answered yet.
 
 ## Settings (`.env`)
 
