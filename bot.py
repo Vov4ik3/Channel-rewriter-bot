@@ -29,6 +29,7 @@ from google import genai
 from google.genai import errors as genai_errors
 from google.genai import types as genai_types
 from telethon import Button, TelegramClient, events
+from telethon.tl.functions.channels import JoinChannelRequest
 from telethon.tl.types import MessageEntityPre
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -36,6 +37,7 @@ TMP_DIR = BASE_DIR / "tmp"
 DB_PATH = BASE_DIR / "seen.db"
 LOG_PATH = BASE_DIR / "bot.log"
 PROMPT_PATH = BASE_DIR / "prompt.txt"
+ENV_PATH = BASE_DIR / ".env"
 USER_SESSION = str(BASE_DIR / "reader")    # -> reader.session
 BOT_SESSION = str(BASE_DIR / "poster")     # -> poster.session
 
@@ -62,6 +64,34 @@ def format_age(dt: datetime) -> str:
     else:
         age = f"{int(secs // 86400)}d ago"
     return f"{dt.strftime('%d %b, %H:%M UTC')} ({age})"
+
+
+def strip_code_fence(text: str) -> str:
+    """A pasted copy of a monospace block may keep its ``` or ` wrapping."""
+    for fence in ("```", "`"):
+        if text.startswith(fence) and text.endswith(fence) and len(text) > 2 * len(fence):
+            return text[len(fence):-len(fence)].strip()
+    return text
+
+
+def update_env(updates: dict[str, str]) -> None:
+    """Rewrites matching KEY=VALUE lines in .env in place; adds missing keys."""
+    lines = ENV_PATH.read_text(encoding="utf-8").splitlines() if ENV_PATH.exists() else []
+    seen = set()
+    out = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#") and "=" in stripped:
+            key = stripped.split("=", 1)[0].strip()
+            if key in updates:
+                out.append(f"{key}={updates[key]}")
+                seen.add(key)
+                continue
+        out.append(line)
+    for key, val in updates.items():
+        if key not in seen:
+            out.append(f"{key}={val}")
+    ENV_PATH.write_text("\n".join(out) + "\n", encoding="utf-8")
 
 
 # ---------------------------------------------------------------- config ---
@@ -100,7 +130,7 @@ class Config:
     api_id: int
     api_hash: str
     gemini_key: str
-    sources: list[int | str]
+    sources: list[str]
     target: int | str
     bot_token: str = ""
     review_mode: bool = False
@@ -120,7 +150,7 @@ class Config:
             api_id = int(_env("TG_API_ID", required=True))
         except ValueError:
             raise ConfigError("TG_API_ID must be a number")
-        sources = [_chat_ref(s) for s in _env("SOURCE_CHANNELS", required=True).split(",") if s.strip()]
+        sources = [s.strip() for s in _env("SOURCE_CHANNELS", required=True).split(",") if s.strip()]
         if not sources:
             raise ConfigError("SOURCE_CHANNELS is empty")
         cfg = cls(
@@ -277,8 +307,11 @@ class App:
         self.queue: asyncio.Queue[Post] = asyncio.Queue()
         self.pending: dict[str, Post] = {}      # review mode drafts
         self.editing: str | None = None         # draft id waiting for new text
+        self.settings_wait: str | None = None   # "add_channel" / "edit_prompt" / "daily_hour"
         self.target_entity = None
+        self.source_entities: list[tuple[str, object | None]] = []   # (ref, entity or None)
         self.loop: asyncio.AbstractEventLoop | None = None
+        self.summary_task: asyncio.Task | None = None
         self.stats = {"posted": 0, "skipped": 0, "failed": 0, "started": time.time()}
         self.posted_log: list[tuple[datetime, str, str, str, str]] = []
         # (posted_at, source_title, new_text, source_link, posted_link)
@@ -305,18 +338,12 @@ class App:
             log.info("Posting through bot @%s", (await self.bot.get_me()).username)
             self.bot.add_event_handler(self.on_callback, events.CallbackQuery())
             self.bot.add_event_handler(self.on_command, events.NewMessage(pattern=r"^/(start|status)"))
+            self.bot.add_event_handler(self.on_settings, events.NewMessage(pattern=r"^/settings"))
             self.bot.add_event_handler(self.on_admin_message, events.NewMessage(incoming=True))
 
         # resolve chats up front so config mistakes show immediately
-        source_entities = []
-        for src in self.cfg.sources:
-            try:
-                ent = await self.user.get_entity(src)
-                source_entities.append(ent)
-                log.info("Watching: %s", getattr(ent, "title", src))
-            except Exception as e:
-                log.error("Can't open source channel %r (%s). Is the reader account subscribed?", src, e)
-        if not source_entities:
+        await self.refresh_source_handlers()
+        if not any(ent for _, ent in self.source_entities):
             raise ConfigError("None of the SOURCE_CHANNELS could be opened")
 
         try:
@@ -327,8 +354,24 @@ class App:
             raise ConfigError(f"Can't open TARGET_CHAT {self.cfg.target!r} ({e}).{hint}")
         log.info("Publishing to: %s", getattr(self.target_entity, "title", self.cfg.target))
 
-        self.user.add_event_handler(self.on_message, events.NewMessage(chats=source_entities))
-        self.user.add_event_handler(self.on_album, events.Album(chats=source_entities))
+    async def refresh_source_handlers(self) -> None:
+        """(Re)resolves SOURCE_CHANNELS and re-registers the message handlers.
+        Called at startup and whenever /settings adds or removes a channel."""
+        if self.user.list_event_handlers():
+            self.user.remove_event_handler(self.on_message)
+            self.user.remove_event_handler(self.on_album)
+        self.source_entities = []
+        for ref in self.cfg.sources:
+            try:
+                ent = await self.user.get_entity(_chat_ref(ref))
+                log.info("Watching: %s", getattr(ent, "title", ref))
+            except Exception as e:
+                ent = None
+                log.error("Can't open source channel %r (%s). Is the reader account subscribed?", ref, e)
+            self.source_entities.append((ref, ent))
+        ok = [ent for _, ent in self.source_entities if ent is not None]
+        self.user.add_event_handler(self.on_message, events.NewMessage(chats=ok))
+        self.user.add_event_handler(self.on_album, events.Album(chats=ok))
 
     async def run(self) -> None:
         await self.start()
@@ -339,7 +382,7 @@ class App:
         elif self.cfg.daily_summary:
             log.info("Daily summary is on but needs BOT_TOKEN and ADMIN_ID to send it")
         worker = asyncio.create_task(self.worker())
-        summary_task = asyncio.create_task(self.daily_summary_loop())
+        self.summary_task = asyncio.create_task(self.daily_summary_loop())
         try:
             waits = [self.user.run_until_disconnected()]
             if self.bot:
@@ -347,10 +390,17 @@ class App:
             await asyncio.gather(*waits)
         finally:
             worker.cancel()
-            summary_task.cancel()
+            if self.summary_task:
+                self.summary_task.cancel()
             for post in self.pending.values():
                 post.cleanup()
             log.info("Stopped")
+
+    def restart_summary_loop(self) -> None:
+        """Re-applies a changed daily-summary hour/on-off setting immediately."""
+        if self.summary_task:
+            self.summary_task.cancel()
+        self.summary_task = asyncio.create_task(self.daily_summary_loop())
 
     async def shutdown(self) -> None:
         for client in (self.user, self.bot):
@@ -580,6 +630,10 @@ class App:
                 await self.send_daily_summary(event)
             return
 
+        if action == "st":
+            await self.handle_settings_callback(event, rest)
+            return
+
         draft_id, _, arg = rest.partition(":")
         post = self.pending.get(draft_id)
         if post is None:
@@ -655,24 +709,24 @@ class App:
             await self.send_draft(draft_id, post)
 
     async def on_admin_message(self, event) -> None:
-        """Receives the new text while a draft is being edited."""
-        if not event.is_private or event.sender_id != self.cfg.admin_id or not self.editing:
+        """Free text from the admin: either new draft text, or an answer to
+        a /settings prompt (add channel / new writing style / summary hour)."""
+        if not event.is_private or event.sender_id != self.cfg.admin_id:
             return
-        text = (event.text or "").strip()
-        if not text or text.startswith("/"):
-            return
-        # a pasted copy of the code block may keep its ``` or ` wrapping
-        for fence in ("```", "`"):
-            if text.startswith(fence) and text.endswith(fence) and len(text) > 2 * len(fence):
-                text = text[len(fence):-len(fence)].strip()
-                break
-        draft_id, self.editing = self.editing, None
-        post = self.pending.get(draft_id)
-        if post is None:
-            return
-        post.new_text = text
-        log.info("Draft %s text edited by admin", draft_id)
-        await self.send_draft(draft_id, post)
+        if self.editing:
+            text = (event.text or "").strip()
+            if not text or text.startswith("/"):
+                return
+            text = strip_code_fence(text)
+            draft_id, self.editing = self.editing, None
+            post = self.pending.get(draft_id)
+            if post is None:
+                return
+            post.new_text = text
+            log.info("Draft %s text edited by admin", draft_id)
+            await self.send_draft(draft_id, post)
+        elif self.settings_wait:
+            await self.handle_settings_input(event)
 
     # ---- daily summary
     #
@@ -715,6 +769,203 @@ class App:
             body = self.fix_formatting(text)
             msg = f"{' · '.join(links)}\n\n{body}"[:MESSAGE_LIMIT]
             await self.bot.send_message(self.cfg.admin_id, msg, link_preview=False)
+
+    # ---- settings (for a non-technical admin: no file editing, no restart)
+
+    def settings_text(self) -> str:
+        daily = f"ON, {self.cfg.daily_summary_hour:02d}:00 UTC" if self.cfg.daily_summary else "OFF"
+        return (
+            "⚙️ Settings\n\n"
+            f"📡 Source channels: {len(self.cfg.sources)}\n"
+            f"🔄 Review mode: {'ON' if self.cfg.review_mode else 'OFF'}\n"
+            f"🖼 Media: {'ON' if self.cfg.include_media else 'OFF'}\n"
+            f"⏰ Daily summary: {daily}"
+        )
+
+    def settings_buttons(self):
+        return [
+            [Button.inline("📡 Channels", "st:channels"), Button.inline("📝 Writing style", "st:prompt")],
+            [Button.inline(f"🔄 Review mode: {'ON' if self.cfg.review_mode else 'OFF'}", "st:review")],
+            [Button.inline(f"🖼 Media: {'ON' if self.cfg.include_media else 'OFF'}", "st:media")],
+            [Button.inline("⏰ Daily summary", "st:daily")],
+            [Button.inline("✖ Close", "st:close")],
+        ]
+
+    def channels_text(self) -> str:
+        if not self.source_entities:
+            return "📡 Channels\n\nNone configured."
+        lines = ["📡 Channels:"]
+        for ref, ent in self.source_entities:
+            title = getattr(ent, "title", None) if ent else None
+            lines.append(f"• {title or ref}" + ("" if ent else " ⚠️ can't open"))
+        return "\n".join(lines)
+
+    def channels_buttons(self):
+        rows = []
+        for i, (ref, ent) in enumerate(self.source_entities):
+            label = (getattr(ent, "title", None) or ref) if ent else f"⚠️ {ref}"
+            rows.append([Button.inline(f"❌ {label[:24]}", f"st:rmch:{i}")])
+        rows.append([Button.inline("➕ Add channel", "st:addch")])
+        rows.append([Button.inline("⬅ Back", "st:home")])
+        return rows
+
+    def daily_text(self) -> str:
+        if not self.cfg.daily_summary:
+            return "⏰ Daily summary: OFF"
+        return f"⏰ Daily summary: ON\nPrompt sent at {self.cfg.daily_summary_hour:02d}:00 UTC"
+
+    def daily_buttons(self):
+        return [
+            [Button.inline("🔕 Turn off" if self.cfg.daily_summary else "🔔 Turn on", "st:dailytoggle")],
+            [Button.inline("🕒 Change hour", "st:dailyhour")],
+            [Button.inline("⬅ Back", "st:home")],
+        ]
+
+    async def on_settings(self, event) -> None:
+        if not event.is_private or event.sender_id != self.cfg.admin_id:
+            return
+        await event.reply(self.settings_text(), buttons=self.settings_buttons())
+
+    async def handle_settings_callback(self, event, rest: str) -> None:
+        sub, _, arg = rest.partition(":")
+
+        if sub == "close":
+            await event.answer()
+            await event.edit(buttons=None)
+
+        elif sub == "home":
+            await event.answer()
+            await event.edit(self.settings_text(), buttons=self.settings_buttons())
+
+        elif sub == "channels":
+            await event.answer()
+            await event.edit(self.channels_text(), buttons=self.channels_buttons())
+
+        elif sub == "rmch":
+            idx = int(arg)
+            if len(self.cfg.sources) <= 1:
+                await event.answer("Can't remove the last channel — add another first", alert=True)
+                return
+            if 0 <= idx < len(self.cfg.sources):
+                removed = self.cfg.sources.pop(idx)
+                update_env({"SOURCE_CHANNELS": ",".join(self.cfg.sources)})
+                await self.refresh_source_handlers()
+                await event.answer(f"Removed {removed}")
+            await event.edit(self.channels_text(), buttons=self.channels_buttons())
+
+        elif sub == "addch":
+            self.settings_wait = "add_channel"
+            await event.answer()
+            await event.edit(
+                "➕ Send the channel's @username or t.me link, or forward any message from it.\n"
+                "The reader account needs to be able to see it — public channels get joined automatically.",
+                buttons=None)
+
+        elif sub == "review":
+            self.cfg.review_mode = not self.cfg.review_mode
+            update_env({"REVIEW_MODE": "1" if self.cfg.review_mode else "0"})
+            await event.answer(f"Review mode {'ON' if self.cfg.review_mode else 'OFF'}")
+            await event.edit(self.settings_text(), buttons=self.settings_buttons())
+
+        elif sub == "media":
+            self.cfg.include_media = not self.cfg.include_media
+            update_env({"INCLUDE_MEDIA": "1" if self.cfg.include_media else "0"})
+            await event.answer(f"Media {'ON' if self.cfg.include_media else 'OFF'}")
+            await event.edit(self.settings_text(), buttons=self.settings_buttons())
+
+        elif sub == "prompt":
+            await event.answer()
+            await event.edit(
+                "📝 Current writing style is below (this is the bot's whole personality/tone).",
+                buttons=[[Button.inline("✏️ Edit", "st:editprompt"), Button.inline("⬅ Back", "st:home")]])
+            text = PROMPT_PATH.read_text(encoding="utf-8")
+            await self.bot.send_message(self.cfg.admin_id, text, parse_mode=None,
+                                        formatting_entities=[MessageEntityPre(0, utf16_len(text), "")])
+
+        elif sub == "editprompt":
+            self.settings_wait = "edit_prompt"
+            await event.answer()
+            await event.edit(
+                "✏️ Send the new writing style as a message. It replaces the current one "
+                "entirely, and applies to the next post — no restart needed.",
+                buttons=None)
+
+        elif sub == "daily":
+            await event.answer()
+            await event.edit(self.daily_text(), buttons=self.daily_buttons())
+
+        elif sub == "dailytoggle":
+            self.cfg.daily_summary = not self.cfg.daily_summary
+            update_env({"DAILY_SUMMARY": "1" if self.cfg.daily_summary else "0"})
+            self.restart_summary_loop()
+            await event.answer(f"Daily summary {'ON' if self.cfg.daily_summary else 'OFF'}")
+            await event.edit(self.daily_text(), buttons=self.daily_buttons())
+
+        elif sub == "dailyhour":
+            self.settings_wait = "daily_hour"
+            await event.answer()
+            await event.edit("🕒 Send the hour (0-23) in UTC for the daily prompt.", buttons=None)
+
+    async def try_add_channel(self, event, ref: str) -> None:
+        # a forwarded message identifies its channel more reliably than typed text
+        fwd = getattr(event.message, "forward", None)
+        chat_id = getattr(fwd, "chat_id", None) if fwd else None
+        if chat_id is not None:
+            ref = str(chat_id)
+
+        try:
+            entity = await self.user.get_entity(_chat_ref(ref))
+        except Exception as e:
+            await event.reply(
+                f"❌ Couldn't find that channel ({e}).\n"
+                "Send an @username, t.me link, or forward a message from it.")
+            return
+
+        try:
+            await self.user(JoinChannelRequest(entity))
+        except Exception:
+            pass  # already a member, or it's private and needs an invite link — get_entity working is enough
+
+        if ref not in self.cfg.sources:
+            self.cfg.sources.append(ref)
+            update_env({"SOURCE_CHANNELS": ",".join(self.cfg.sources)})
+            await self.refresh_source_handlers()
+
+        title = getattr(entity, "title", ref)
+        await event.reply(f"✅ Added: {title}\nNow watching {len(self.cfg.sources)} channel(s).")
+
+    async def handle_settings_input(self, event) -> None:
+        text = (event.text or "").strip()
+        if not text and not event.message.forward:
+            return
+        if text.startswith("/"):
+            return
+        text = strip_code_fence(text)
+        mode, self.settings_wait = self.settings_wait, None
+
+        if mode == "add_channel":
+            await self.try_add_channel(event, text)
+
+        elif mode == "edit_prompt":
+            if not text:
+                self.settings_wait = mode
+                return
+            PROMPT_PATH.write_text(text + "\n", encoding="utf-8")
+            await event.reply("✅ Writing style updated. Applies to the next post — no restart needed.")
+
+        elif mode == "daily_hour":
+            try:
+                hour = int(text)
+                if not 0 <= hour <= 23:
+                    raise ValueError
+            except ValueError:
+                self.settings_wait = mode
+                await event.reply("Send a number 0-23 (that's the UTC hour).")
+                return
+            self.cfg.daily_summary_hour = hour
+            update_env({"DAILY_SUMMARY_HOUR_UTC": str(hour)})
+            self.restart_summary_loop()
+            await event.reply(f"✅ Daily summary time set to {hour:02d}:00 UTC.")
 
     async def on_command(self, event) -> None:
         if not event.is_private or event.sender_id != self.cfg.admin_id:

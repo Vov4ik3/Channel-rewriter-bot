@@ -128,6 +128,26 @@ Note: original images/videos aren't re-sent here (they're deleted from disk
 right after posting) — the 📢 link takes you straight to the published post,
 media included.
 
+## 7. `/settings` — changing things without editing files
+
+With `BOT_TOKEN` and `ADMIN_ID` set, send `/settings` to the bot for a menu
+you can run entirely from Telegram — no `.env` or `prompt.txt` editing, no
+restart. Good for handing the bot off to someone non-technical.
+
+- **📡 Channels** — lists what's being watched, with a ❌ button to remove
+  each one, and **➕ Add channel**: send an `@username`, `t.me` link, or just
+  forward any message from the channel. If it's public, the reader account
+  joins it automatically. (The last remaining channel can't be removed.)
+- **📝 Writing style** — shows the current `prompt.txt` and lets you replace
+  it by sending new text — this is the same file described in section 4,
+  just editable from chat instead of a text editor.
+- **🔄 Review mode** / **🖼 Media** — one-tap on/off toggles.
+- **⏰ Daily summary** — turn the daily prompt on/off and change what hour
+  (UTC) it's sent at.
+
+Every change here is written straight into `.env`, so it survives a
+restart, and takes effect immediately without one.
+
 Drafts are kept in memory, so restarting the bot expires any that haven't been
 answered yet.
 
