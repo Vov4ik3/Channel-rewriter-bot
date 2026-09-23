@@ -20,6 +20,7 @@ import sys
 import time
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
@@ -47,6 +48,20 @@ log = logging.getLogger("rewriter")
 def utf16_len(text: str) -> int:
     """Telegram measures entity offsets in UTF-16 code units (emoji count as 2)."""
     return len(text.encode("utf-16-le")) // 2
+
+
+def format_age(dt: datetime) -> str:
+    """'23 Sep, 14:32 UTC (2h ago)', so stale drafts stand out in review."""
+    secs = (datetime.now(timezone.utc) - dt).total_seconds()
+    if secs < 60:
+        age = "just now"
+    elif secs < 3600:
+        age = f"{int(secs // 60)}m ago"
+    elif secs < 86400:
+        age = f"{int(secs // 3600)}h ago"
+    else:
+        age = f"{int(secs // 86400)}d ago"
+    return f"{dt.strftime('%d %b, %H:%M UTC')} ({age})"
 
 
 # ---------------------------------------------------------------- config ---
@@ -224,6 +239,7 @@ class Post:
     text: str
     source_title: str
     link: str
+    post_date: datetime
     files: list[Path] = field(default_factory=list)
     workdir: Path | None = None
     new_text: str = ""
@@ -357,7 +373,7 @@ class App:
         title = getattr(chat, "title", "") or "channel"
         username = getattr(chat, "username", None)
         link = f"https://t.me/{username}/{first.id}" if username else ""
-        post = Post(text=text, source_title=title, link=link)
+        post = Post(text=text, source_title=title, link=link, post_date=first.date)
 
         if self.cfg.include_media:
             await self.download_media(post, messages)
@@ -473,11 +489,12 @@ class App:
     def review_text(self, post: Post) -> str:
         title = post.source_title.replace("[", "(").replace("]", ")")
         source = f"🔗 [{title}]({post.link})" if post.link else f"🔗 {title}"
+        when = f"\n🕒 {format_age(post.post_date)}"
         media = ""
         if post.files:
             media = f"\n🖼 {len(post.chosen_files)} of {len(post.files)} images will be posted"
         body = self.fix_formatting(post.new_text)
-        return f"{source}{media}\n\n{body}"[:MESSAGE_LIMIT]
+        return f"{source}{when}{media}\n\n{body}"[:MESSAGE_LIMIT]
 
     async def send_media_preview(self, post: Post) -> None:
         files = [str(p) for p in post.files]
@@ -627,12 +644,21 @@ class App:
             return
         s = self.stats
         uptime = int(time.time() - s["started"])
-        await event.reply(
-            f"🟢 Running for {uptime // 3600}h {uptime % 3600 // 60}m\n"
-            f"Mode: {'review' if self.cfg.review_mode else 'auto-post'}\n"
-            f"Posted: {s['posted']} · Skipped: {s['skipped']} · Failed: {s['failed']}\n"
-            f"In queue: {self.queue.qsize()} · Awaiting review: {len(self.pending)}"
-        )
+        lines = [
+            f"🟢 Running for {uptime // 3600}h {uptime % 3600 // 60}m",
+            f"Mode: {'review' if self.cfg.review_mode else 'auto-post'}",
+            f"Posted: {s['posted']} · Skipped: {s['skipped']} · Failed: {s['failed']}",
+            f"In queue: {self.queue.qsize()} · Awaiting review: {len(self.pending)}",
+        ]
+        if self.pending:
+            drafts = sorted(self.pending.values(), key=lambda p: p.post_date)
+            lines.append("")
+            lines.append("Awaiting review, oldest first:")
+            for post in drafts[:10]:
+                lines.append(f"  • {format_age(post.post_date)} — {post.source_title}")
+            if len(drafts) > 10:
+                lines.append(f"  …and {len(drafts) - 10} more")
+        await event.reply("\n".join(lines))
 
 
 # ----------------------------------------------------------------- main ---

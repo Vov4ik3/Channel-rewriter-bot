@@ -89,7 +89,9 @@ In `.env`, set `BOT_TOKEN`, set `ADMIN_ID` to your own id, and set
 draft comes to your DMs first:
 
 - The images come first as a numbered album, then the draft with a 🔗 link
-  to the original post and a line saying how many images will be posted.
+  to the original post, a 🕒 line showing how old that post is (so you can
+  tell fresh news from a backlog of "olds"), and a line saying how many
+  images will be posted.
 - ✅ **Post** publishes it to the group (text and chosen images, no link).
 - ✏️ **Edit** opens a two-step editor:
   1. **Images.** Tap the numbers to include (✅) or exclude (⬜) each one,
@@ -108,7 +110,8 @@ draft comes to your DMs first:
 
 `**bold**` and `__italic__` in your text are formatted when posted.
 
-Send `/status` to the bot at any time to see uptime, counts and queue size.
+Send `/status` to the bot at any time to see uptime, counts, queue size, and
+(if any drafts are waiting) each one's age, oldest first.
 
 Drafts are kept in memory, so restarting the bot expires any that haven't been
 answered yet.
