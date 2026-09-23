@@ -117,9 +117,16 @@ Send `/status` to the bot at any time to see uptime, counts, queue size, and
 
 With `BOT_TOKEN` and `ADMIN_ID` set, the bot DMs you once a day (default
 18:00 UTC, set with `DAILY_SUMMARY_HOUR_UTC`): **📰 Show summary** /
-**Not today**. Tapping **Show summary** lists what's been posted since UTC
-midnight (source + a one-line headline each), or says `No new posts today`
-if nothing went out. Set `DAILY_SUMMARY=0` to turn this off.
+**Not today**. Tapping **Show summary** reposts every post published since
+UTC midnight back to you as its own DM — full text, with a 📢 link to where
+it landed in your channel and a 🔗 link to the original source (the 📢 link
+only appears if `TARGET_CHAT` is a public channel/group with a username).
+If nothing was posted, you get `No new posts today` instead. Set
+`DAILY_SUMMARY=0` to turn this off.
+
+Note: original images/videos aren't re-sent here (they're deleted from disk
+right after posting) — the 📢 link takes you straight to the published post,
+media included.
 
 Drafts are kept in memory, so restarting the bot expires any that haven't been
 answered yet.

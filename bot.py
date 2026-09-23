@@ -280,7 +280,8 @@ class App:
         self.target_entity = None
         self.loop: asyncio.AbstractEventLoop | None = None
         self.stats = {"posted": 0, "skipped": 0, "failed": 0, "started": time.time()}
-        self.posted_log: list[tuple[datetime, str, str]] = []   # (posted_at, source_title, new_text)
+        self.posted_log: list[tuple[datetime, str, str, str, str]] = []
+        # (posted_at, source_title, new_text, source_link, posted_link)
 
     @property
     def poster(self) -> TelegramClient:
@@ -450,6 +451,15 @@ class App:
         text = re.sub(r"(?<![_\w])_(?![_\s])(.+?)(?<![_\s])_(?![_\w])", r"__\1__", text)
         return text
 
+    def posted_link(self, sent) -> str:
+        """Link to the just-published message in TARGET_CHAT, if it's public."""
+        username = getattr(self.target_entity, "username", None)
+        if not username:
+            return ""
+        msg = sent[0] if isinstance(sent, list) else sent
+        mid = getattr(msg, "id", None)
+        return f"https://t.me/{username}/{mid}" if mid else ""
+
     async def publish(self, post: Post) -> None:
         text = self.fix_formatting(post.new_text)
         files = [str(p) for p in post.chosen_files]
@@ -458,16 +468,19 @@ class App:
             if files:
                 if len(text) <= CAPTION_LIMIT:
                     if len(files) > 1:
-                        await self.poster.send_file(target, files, caption=[text] + [""] * (len(files) - 1))
+                        sent = await self.poster.send_file(target, files, caption=[text] + [""] * (len(files) - 1))
                     else:
-                        await self.poster.send_file(target, files[0], caption=text)
+                        sent = await self.poster.send_file(target, files[0], caption=text)
                 else:  # too long for a caption: media first, then the text
-                    await self.poster.send_file(target, files)
-                    await self.poster.send_message(target, text[:MESSAGE_LIMIT], link_preview=False)
+                    sent = await self.poster.send_file(target, files)
+                    sent = await self.poster.send_message(target, text[:MESSAGE_LIMIT], link_preview=False)
             else:
-                await self.poster.send_message(target, text[:MESSAGE_LIMIT], link_preview=False)
+                sent = await self.poster.send_message(target, text[:MESSAGE_LIMIT], link_preview=False)
             self.stats["posted"] += 1
-            self.posted_log.append((datetime.now(timezone.utc), post.source_title, post.new_text))
+            self.posted_log.append((
+                datetime.now(timezone.utc), post.source_title, post.new_text,
+                post.link, self.posted_link(sent),
+            ))
             log.info("Posted rewrite of a post from %s", post.source_title)
         finally:
             post.cleanup()
@@ -564,7 +577,7 @@ class App:
                 await event.edit("Not today, got it.", buttons=None)
             else:
                 await event.answer()
-                await event.edit(self.build_daily_summary(), buttons=None, link_preview=False)
+                await self.send_daily_summary(event)
             return
 
         draft_id, _, arg = rest.partition(":")
@@ -686,16 +699,22 @@ class App:
             cutoff = datetime.now(timezone.utc) - timedelta(days=2)
             self.posted_log = [e for e in self.posted_log if e[0] >= cutoff]
 
-    def build_daily_summary(self) -> str:
+    async def send_daily_summary(self, event) -> None:
+        """Edits the prompt to a header, then reposts each of today's posts
+        as its own DM (full text, links to source and to the live post)."""
         today = datetime.now(timezone.utc).date()
         todays = [e for e in self.posted_log if e[0].date() == today]
         if not todays:
-            return "📰 No new posts today."
-        lines = [f"📰 Today's summary — {len(todays)} post{'s' if len(todays) != 1 else ''}:"]
-        for _, title, text in todays:
-            headline = text.strip().splitlines()[0].strip("* ")[:80]
-            lines.append(f"• {title}: {headline}")
-        return "\n".join(lines)[:MESSAGE_LIMIT]
+            await event.edit("📰 No new posts today.", buttons=None)
+            return
+        await event.edit(f"📰 {len(todays)} post{'s' if len(todays) != 1 else ''} today:", buttons=None)
+        for _, title, text, source_link, target_link in todays:
+            title = title.replace("[", "(").replace("]", ")")
+            links = [f"📢 [Posted]({target_link})"] if target_link else []
+            links.append(f"🔗 [{title}]({source_link})" if source_link else f"🔗 {title}")
+            body = self.fix_formatting(text)
+            msg = f"{' · '.join(links)}\n\n{body}"[:MESSAGE_LIMIT]
+            await self.bot.send_message(self.cfg.admin_id, msg, link_preview=False)
 
     async def on_command(self, event) -> None:
         if not event.is_private or event.sender_id != self.cfg.admin_id:
