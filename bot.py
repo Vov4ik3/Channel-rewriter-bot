@@ -20,7 +20,7 @@ import sys
 import time
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
@@ -110,6 +110,8 @@ class Config:
     include_media: bool = True
     max_media_mb: int = 45
     gemini_delay: float = 6.0
+    daily_summary: bool = True
+    daily_summary_hour: int = 18
 
     @classmethod
     def load(cls) -> "Config":
@@ -135,6 +137,8 @@ class Config:
             include_media=_env_bool("INCLUDE_MEDIA", True),
             max_media_mb=int(_env("MAX_MEDIA_MB", "45")),
             gemini_delay=float(_env("GEMINI_DELAY_SECONDS", "6")),
+            daily_summary=_env_bool("DAILY_SUMMARY", True),
+            daily_summary_hour=int(_env("DAILY_SUMMARY_HOUR_UTC", "18")),
         )
         if cfg.review_mode and not (cfg.bot_token and cfg.admin_id):
             raise ConfigError("REVIEW_MODE=1 needs both BOT_TOKEN and ADMIN_ID")
@@ -276,6 +280,7 @@ class App:
         self.target_entity = None
         self.loop: asyncio.AbstractEventLoop | None = None
         self.stats = {"posted": 0, "skipped": 0, "failed": 0, "started": time.time()}
+        self.posted_log: list[tuple[datetime, str, str]] = []   # (posted_at, source_title, new_text)
 
     @property
     def poster(self) -> TelegramClient:
@@ -328,7 +333,12 @@ class App:
         await self.start()
         mode = "review (drafts go to admin first)" if self.cfg.review_mode else "auto-post"
         log.info("Running in %s mode. Model: %s", mode, self.cfg.model)
+        if self.cfg.daily_summary and self.bot and self.cfg.admin_id:
+            log.info("Daily summary prompt at %02d:00 UTC", self.cfg.daily_summary_hour)
+        elif self.cfg.daily_summary:
+            log.info("Daily summary is on but needs BOT_TOKEN and ADMIN_ID to send it")
         worker = asyncio.create_task(self.worker())
+        summary_task = asyncio.create_task(self.daily_summary_loop())
         try:
             waits = [self.user.run_until_disconnected()]
             if self.bot:
@@ -336,6 +346,7 @@ class App:
             await asyncio.gather(*waits)
         finally:
             worker.cancel()
+            summary_task.cancel()
             for post in self.pending.values():
                 post.cleanup()
             log.info("Stopped")
@@ -456,6 +467,7 @@ class App:
             else:
                 await self.poster.send_message(target, text[:MESSAGE_LIMIT], link_preview=False)
             self.stats["posted"] += 1
+            self.posted_log.append((datetime.now(timezone.utc), post.source_title, post.new_text))
             log.info("Posted rewrite of a post from %s", post.source_title)
         finally:
             post.cleanup()
@@ -545,6 +557,16 @@ class App:
             await event.answer("Not allowed")
             return
         action, _, rest = event.data.decode().partition(":")
+
+        if action == "ds":
+            if rest == "skip":
+                await event.answer("Skipped")
+                await event.edit("Not today, got it.", buttons=None)
+            else:
+                await event.answer()
+                await event.edit(self.build_daily_summary(), buttons=None, link_preview=False)
+            return
+
         draft_id, _, arg = rest.partition(":")
         post = self.pending.get(draft_id)
         if post is None:
@@ -639,6 +661,42 @@ class App:
         log.info("Draft %s text edited by admin", draft_id)
         await self.send_draft(draft_id, post)
 
+    # ---- daily summary
+    #
+    # Once a day, DMs the admin "Show summary" / "Not today". Tapping Show
+    # summary lists what got posted since UTC midnight (or says nothing did).
+
+    async def daily_summary_loop(self) -> None:
+        if not (self.bot and self.cfg.admin_id and self.cfg.daily_summary):
+            return
+        while True:
+            now = datetime.now(timezone.utc)
+            target = now.replace(hour=self.cfg.daily_summary_hour, minute=0, second=0, microsecond=0)
+            if target <= now:
+                target += timedelta(days=1)
+            await asyncio.sleep((target - now).total_seconds())
+            try:
+                await self.bot.send_message(
+                    self.cfg.admin_id,
+                    "📰 Daily summary time. Want to see what got posted today?",
+                    buttons=[[Button.inline("📰 Show summary", "ds:show"),
+                              Button.inline("Not today", "ds:skip")]])
+            except Exception:
+                log.exception("Daily summary prompt failed")
+            cutoff = datetime.now(timezone.utc) - timedelta(days=2)
+            self.posted_log = [e for e in self.posted_log if e[0] >= cutoff]
+
+    def build_daily_summary(self) -> str:
+        today = datetime.now(timezone.utc).date()
+        todays = [e for e in self.posted_log if e[0].date() == today]
+        if not todays:
+            return "📰 No new posts today."
+        lines = [f"📰 Today's summary — {len(todays)} post{'s' if len(todays) != 1 else ''}:"]
+        for _, title, text in todays:
+            headline = text.strip().splitlines()[0].strip("* ")[:80]
+            lines.append(f"• {title}: {headline}")
+        return "\n".join(lines)[:MESSAGE_LIMIT]
+
     async def on_command(self, event) -> None:
         if not event.is_private or event.sender_id != self.cfg.admin_id:
             return
@@ -649,6 +707,7 @@ class App:
             f"Mode: {'review' if self.cfg.review_mode else 'auto-post'}",
             f"Posted: {s['posted']} · Skipped: {s['skipped']} · Failed: {s['failed']}",
             f"In queue: {self.queue.qsize()} · Awaiting review: {len(self.pending)}",
+            f"Posted today: {sum(1 for e in self.posted_log if e[0].date() == datetime.now(timezone.utc).date())}",
         ]
         if self.pending:
             drafts = sorted(self.pending.values(), key=lambda p: p.post_date)

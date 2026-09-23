@@ -113,6 +113,14 @@ draft comes to your DMs first:
 Send `/status` to the bot at any time to see uptime, counts, queue size, and
 (if any drafts are waiting) each one's age, oldest first.
 
+## 6. Daily summary
+
+With `BOT_TOKEN` and `ADMIN_ID` set, the bot DMs you once a day (default
+18:00 UTC, set with `DAILY_SUMMARY_HOUR_UTC`): **📰 Show summary** /
+**Not today**. Tapping **Show summary** lists what's been posted since UTC
+midnight (source + a one-line headline each), or says `No new posts today`
+if nothing went out. Set `DAILY_SUMMARY=0` to turn this off.
+
 Drafts are kept in memory, so restarting the bot expires any that haven't been
 answered yet.
 
